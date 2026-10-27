@@ -91,6 +91,7 @@ mod loopblend;
 mod matchsurf;
 mod measure;
 mod mesh_convert;
+mod mesh_convert_milled;
 mod meshbody;
 #[cfg(test)]
 mod modify_history_tests;

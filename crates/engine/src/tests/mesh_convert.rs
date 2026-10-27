@@ -145,6 +145,33 @@ fn exported_binary_stl_with_a_bore_reconstructs_analytic_faces() {
     std::fs::remove_file(path).unwrap();
 }
 
+/// A milled part written as STL (a pocket, a through hole from the top, a blind hole from the
+/// front and a through hole from the side) comes back as planes and cylinders of the same
+/// volume, not as a faceted solid.
+#[test]
+fn exported_stl_of_a_milled_part_reconstructs_pockets_and_holes_from_three_sides() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length":60,"width":40,"height":25,"corner":[0,0,0]}));
+    run(&mut s, "solid.box", json!({"length":20,"width":20,"height":11,"corner":[10,10,15],"operation":"cut"}));
+    run(&mut s, "solid.cylinder", json!({"base":[45,20,-1],"radius":4,"height":27,"operation":"cut"}));
+    run(&mut s, "solid.cylinder", json!({"base":[45,-1,8],"radius":3,"height":16,"axis":"Y","operation":"cut"}));
+    run(&mut s, "solid.cylinder", json!({"base":[-1,33,6],"radius":2.5,"height":62,"axis":"X","operation":"cut"}));
+    let expected = solidcraft_kernel::measure(&s.model.state().bodies[0].body).unwrap().volume;
+    let path = std::env::temp_dir().join(format!("solidcraft-mesh-convert-milled-{}.stl", std::process::id()));
+    run(&mut s, "file.save_mesh", json!({"path":path}));
+    run(&mut s, "doc.open", json!({"path":path}));
+    let name = s.model.state().bodies[0].name.clone();
+    run(&mut s, "mesh.convert", json!({"body":name,"tolerance":"0.05 mm"}));
+    let state = s.model.state();
+    let body = &state.bodies[0].body;
+    assert!(!body.is_mesh());
+    assert!(body.validity().is_empty());
+    let measured = solidcraft_kernel::measure(body).unwrap();
+    assert!((measured.volume - expected).abs() < 1., "{} vs {expected}", measured.volume);
+    assert_eq!(measured.merged.face_types.get("cylinder"), Some(&3), "{:?}", measured.merged.face_types);
+    std::fs::remove_file(path).unwrap();
+}
+
 /// #784: STL is closed as written where faces meet (a fillet, a bored hole): every edge of the
 /// file, keyed by its exact f32 ends, is shared by exactly two triangles, as in 3MF.
 #[test]

@@ -64,7 +64,9 @@ and help is welcome: see [CONTRIBUTING.md](../CONTRIBUTING.md).
   3MF, STL, OBJ and glTF 2.0 (`.glb`/`.gltf`, its node tree as components and its materials as
   appearances) import as mesh bodies (they render, measure, move and export; solid features
   need B-rep bodies). The `mesh.convert` command reconstructs supported closed constant-section parts
-  as parametric solids with planar and circular cylindrical faces;
+  and milled parts (pockets, steps and holes along up to six machining directions, certified
+  against the mesh within the tolerance) as parametric solids with planar and circular
+  cylindrical faces;
   STEP import (AP203/AP214/AP242 solids, assemblies, units, names, colours) and IGES import
   (manifold solid B-reps, or trimmed and bounded surfaces sewn into solids) as a base feature
   that later features build on — open a `.step`/`.stp`/`.igs`/`.iges` file, insert one into a

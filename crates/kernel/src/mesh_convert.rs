@@ -1,4 +1,5 @@
-//! Conservative reconstruction of constant-section mechanical mesh parts.
+//! Conservative reconstruction of mechanical mesh parts: constant-section prisms here, milled
+//! parts (walls along several machining directions) in [`crate::mesh_convert_milled`].
 //! Geometry is inferred from closed, manifold input, never from a display mesh.
 
 use std::collections::BTreeMap;
@@ -22,11 +23,11 @@ fn invalid(message: &str) -> KernelError {
 /// parts convert, so a smaller freeform mesh would still be refused (#346).
 fn over_budget(triangles: usize) -> KernelError {
     invalid(&format!(
-        "the mesh has {triangles} triangles, more than the {MAX_TRIANGLES} conversion can take; only closed constant-section parts (one profile extruded straight) can be converted, so a freeform mesh is refused at any size"
+        "the mesh has {triangles} triangles, more than the {MAX_TRIANGLES} conversion can take; only closed constant-section parts (one profile extruded straight) and milled parts (planes and holes along a few machining directions) can be converted, so a freeform mesh is refused at any size"
     ))
 }
 
-/// Reconstruct a constant-section mesh as analytic planes and, where certified
+/// Reconstruct a constant-section or milled mesh as analytic planes and, where certified
 /// within `tolerance` mm, circular cylinders. The source mesh is not modified.
 /// Unsupported shapes are refused instead of silently returning a faceted solid.
 pub fn convert_prismatic_mesh(body: &Body, tolerance: f64) -> Result<Body> {
@@ -72,11 +73,15 @@ pub fn convert_prismatic_mesh(body: &Body, tolerance: f64) -> Result<Body> {
                 return Ok(result);
             }
         }
-        Err(invalid("this mesh is not a supported constant-section prism; no geometry was converted"))
+        crate::mesh_convert_milled::convert_milled(mesh, tolerance).map_err(|e| {
+            let reason = e.to_string();
+            let reason = reason.strip_prefix("invalid input: mesh conversion: ").unwrap_or(&reason);
+            invalid(&format!("this mesh is neither a constant-section prism nor a milled part ({reason}); no geometry was converted"))
+        })
     })
 }
 
-fn weld(mesh: &crate::meshbody::TriMesh, tolerance: f64) -> Result<Body> {
+pub(crate) fn weld(mesh: &crate::meshbody::TriMesh, tolerance: f64) -> Result<Body> {
     if mesh.triangles.len() > MAX_TRIANGLES {
         return Err(over_budget(mesh.triangles.len()));
     }
@@ -303,7 +308,7 @@ fn extrusion(mesh: &crate::meshbody::TriMesh, axis: Vec3, tolerance: f64) -> Res
     Ok(Some(body))
 }
 
-fn certify_nesting(raw: &[Loop2], fitted: &[Loop2], epsilon: f64, size: f64) -> Result<()> {
+pub(crate) fn certify_nesting(raw: &[Loop2], fitted: &[Loop2], epsilon: f64, size: f64) -> Result<()> {
     if raw.len() > MAX_LOOPS {
         return Err(KernelError::Invalid(format!(
             "mesh conversion: too complex to convert ({} boundary loops; at most {MAX_LOOPS} are supported)",

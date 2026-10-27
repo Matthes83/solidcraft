@@ -1750,7 +1750,7 @@ pub enum FeatureKind {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         skip: Vec<u64>,
     },
-    /// Rebuild an upstream constant-section mesh with analytic planar/cylindrical faces.
+    /// Rebuild an upstream constant-section or milled mesh with analytic planar/cylindrical faces.
     MeshConvert {
         body: BodyName,
         #[walk(length = "Tolerance")]
