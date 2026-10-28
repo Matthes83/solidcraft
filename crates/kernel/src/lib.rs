@@ -92,6 +92,7 @@ mod matchsurf;
 mod measure;
 mod mesh_convert;
 mod mesh_convert_milled;
+mod mesh_regions;
 mod meshbody;
 #[cfg(test)]
 mod modify_history_tests;
@@ -189,7 +190,8 @@ pub use lip::{raise_band, rim_band};
 pub use loft_blend::loft_blend;
 pub use matchsurf::{match_surface, seam_continuity};
 pub use measure::{BodyMeasure, MassMeasure, measure, measure_mass};
-pub use mesh_convert::convert_prismatic_mesh;
+pub use mesh_convert::{convert_mesh_with_regions, convert_prismatic_mesh};
+pub use mesh_regions::{MeshRegion, Primitive, SurfaceKind, picks_for_all, recognize_all, recognize_region};
 pub use meshbody::{MAX_TRIANGLES, mesh_body};
 pub use native::{decode_native_body, encode_native_body, native_preview_mesh};
 pub use offset::with_same_surface;

@@ -1755,6 +1755,14 @@ pub enum FeatureKind {
         body: BodyName,
         #[walk(length = "Tolerance")]
         tolerance: Expr,
+        /// Surfaces picked on the mesh, in order (reverse engineering by hand): each pick's
+        /// region is recognised and the mesh's vertices are put onto it before the solid is
+        /// built. Empty in designs from before picks: the mesh converts as it is.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        picks: Vec<MeshPick>,
+        /// Recognise every surface of the mesh first, as if each had been picked.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all_surfaces: bool,
     },
     /// Mesh bodies imported from a 3MF or STL file, embedded in the design.
     MeshImport {
@@ -2004,6 +2012,15 @@ fn fair_iterations() -> u32 {
 }
 fn fair_keep_edges() -> bool {
     true
+}
+
+/// A surface picked on a mesh body for [`FeatureKind::MeshConvert`]: a point on the mesh, in
+/// the body's coordinates, and the kind of surface there (`auto` for whichever fits).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MeshPick {
+    pub point: [f64; 3],
+    #[serde(default)]
+    pub kind: solidcraft_kernel::SurfaceKind,
 }
 
 /// Triangles of one imported mesh body (millimetres). The arrays are shared by clones: every

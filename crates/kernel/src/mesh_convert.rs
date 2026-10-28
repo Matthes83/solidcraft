@@ -31,9 +31,22 @@ fn over_budget(triangles: usize) -> KernelError {
 /// within `tolerance` mm, circular cylinders. The source mesh is not modified.
 /// Unsupported shapes are refused instead of silently returning a faceted solid.
 pub fn convert_prismatic_mesh(body: &Body, tolerance: f64) -> Result<Body> {
+    convert_mesh_with_regions(body, tolerance, &[])
+}
+
+/// [`convert_prismatic_mesh`] guided by picked surfaces, as in reverse engineering by hand:
+/// each pick (a point on the mesh and the kind of surface there, or [`SurfaceKind::Auto`])
+/// recognises the region around it ([`crate::recognize_region`]). The mesh's vertices are put
+/// onto the recognised surfaces before the solid is built, so their exact sizes carry over and
+/// noise does not; picked cones and spheres (drill points, spherical pockets) are cut from the
+/// milled solid as solids of their own. The result is certified against the original mesh.
+pub fn convert_mesh_with_regions(body: &Body, tolerance: f64, picks: &[(Vec3, crate::SurfaceKind)]) -> Result<Body> {
     crate::guard("convert prismatic mesh", || {
         if !tolerance.is_finite() || !(1e-6..=1.).contains(&tolerance) {
             return Err(invalid("tolerance must be between 0.000001 and 1 mm"));
+        }
+        if picks.len() > 10_000 || picks.iter().any(|(p, _)| !p.is_finite()) {
+            return Err(invalid("picks must be finite points, at most 10000"));
         }
         let input = body.mesh.as_ref().ok_or_else(|| invalid("select a mesh body"))?;
         let welded = weld(input, tolerance)?;
@@ -41,6 +54,14 @@ pub fn convert_prismatic_mesh(body: &Body, tolerance: f64) -> Result<Body> {
         if mesh.triangles.len() > MAX_TRIANGLES {
             return Err(over_budget(mesh.triangles.len()));
         }
+        let (snapped, features) = if picks.is_empty() {
+            (None, crate::mesh_convert_milled::Features::default())
+        } else {
+            let (m, f) = crate::mesh_regions::snap_to_picks(mesh, tolerance, picks)?;
+            (Some(m), f)
+        };
+        let original = mesh;
+        let mesh = snapped.as_ref().unwrap_or(mesh);
         let mut edges: BTreeMap<(u32, u32), (usize, i32)> = BTreeMap::new();
         let mut axes: BTreeMap<(i64, i64, i64), (Vec3, f64)> = BTreeMap::new();
         for triangle in &mesh.triangles {
@@ -50,12 +71,14 @@ pub fn convert_prismatic_mesh(body: &Body, tolerance: f64) -> Result<Body> {
                 return Err(invalid("triangle refers to a missing vertex"));
             };
             let cross = (*pb - *pa).cross(*pc - *pa);
-            let Some(mut n) = cross.normalized() else { return Err(invalid("degenerate triangle")) };
             for (a, b) in [(a, b), (b, c), (c, a)] {
                 let entry = edges.entry((a.min(b), a.max(b))).or_default();
                 entry.0 += 1;
                 entry.1 += if a < b { 1 } else { -1 };
             }
+            // A zero-area sliver (common in exported meshes) still closes the mesh, but has
+            // no direction of its own.
+            let Some(mut n) = cross.normalized() else { continue };
             if n.x < -1e-8 || (n.x.abs() <= 1e-8 && (n.y < -1e-8 || (n.y.abs() <= 1e-8 && n.z < 0.))) {
                 n = -n;
             }
@@ -68,12 +91,14 @@ pub fn convert_prismatic_mesh(body: &Body, tolerance: f64) -> Result<Body> {
         }
         let mut axes: Vec<_> = axes.into_values().collect();
         axes.sort_by(|a, b| b.1.total_cmp(&a.1));
-        for (axis, _) in axes.into_iter().take(16) {
-            if let Some(result) = extrusion(mesh, axis, tolerance)? {
-                return Ok(result);
+        if features.solids.is_empty() {
+            for (axis, _) in axes.into_iter().take(16) {
+                if let Some(result) = extrusion(mesh, axis, tolerance)? {
+                    return Ok(result);
+                }
             }
         }
-        crate::mesh_convert_milled::convert_milled(mesh, tolerance).map_err(|e| {
+        crate::mesh_convert_milled::convert_milled_with(mesh, original, tolerance, &features).map_err(|e| {
             let reason = e.to_string();
             let reason = reason.strip_prefix("invalid input: mesh conversion: ").unwrap_or(&reason);
             invalid(&format!("this mesh is neither a constant-section prism nor a milled part ({reason}); no geometry was converted"))

@@ -49,7 +49,18 @@ enum Role {
 
 /// A milled part as analytic planes and cylinders, or an error saying why it is not one.
 /// `mesh` is welded, closed and consistently oriented.
-pub(crate) fn convert_milled(mesh: &TriMesh, tolerance: f64) -> Result<Body> {
+/// Surfaces recognised beforehand that no machining direction makes: drill points and
+/// spherical pockets, already filled in the mesh to be milled. Each is cut from the milled
+/// solid as a solid of its own.
+#[derive(Default)]
+pub(crate) struct Features {
+    /// The surface, the vertices of its region, and whether the region is concave.
+    pub(crate) solids: Vec<(crate::Primitive, Vec<Vec3>, bool)>,
+}
+
+/// A milled part from `mesh` (possibly with its vertices put onto recognised surfaces),
+/// certified against the `original` mesh.
+pub(crate) fn convert_milled_with(mesh: &TriMesh, original: &TriMesh, tolerance: f64, features: &Features) -> Result<Body> {
     let bounds = mesh.positions.iter().fold(solidcraft_geom::Aabb3::EMPTY, |mut b, p| {
         b.add(*p);
         b
@@ -102,9 +113,45 @@ pub(crate) fn convert_milled(mesh: &TriMesh, tolerance: f64) -> Result<Body> {
         }
         result = Some(body);
     }
-    let result = result.ok_or_else(|| invalid("no machining direction found"))?;
-    certify(&result, mesh, &tris, tolerance, total, epsilon, size)?;
+    let mut result = result.ok_or_else(|| invalid("no machining direction found"))?;
+    for (surface, vertices, concave) in &features.solids {
+        if !concave {
+            return Err(invalid(
+                "raised cones and spheres (a domed boss, a pointed pin) are not supported yet; only drill points and spherical pockets",
+            ));
+        }
+        let tool = feature_solid(surface, vertices)?;
+        result = crate::boolean(&result, &tool, BoolOp::Cut)?.ok_or_else(|| invalid("a recognised pocket removes the whole part"))?;
+    }
+    let original_tris = triangles(original)?;
+    let original_total: f64 = original_tris.iter().map(|t| t.area).sum();
+    certify(&result, original, &original_tris, tolerance, original_total, epsilon, size)?;
     Ok(result)
+}
+
+/// The solid a recognised concave cone or sphere cuts: a cone from its apex to the farthest of
+/// its region's vertices, or the whole sphere.
+fn feature_solid(surface: &crate::Primitive, vertices: &[Vec3]) -> Result<Body> {
+    match *surface {
+        crate::Primitive::Sphere { center, radius } => crate::sphere(center, radius),
+        crate::Primitive::Cone { apex, axis, half_angle } => {
+            let depth = vertices.iter().map(|p| (*p - apex).dot(axis)).fold(0f64, f64::max);
+            if !(depth > 0.) {
+                return Err(invalid("a recognised cone has no depth"));
+            }
+            let across = axis.any_perp().normalized().ok_or_else(|| invalid("degenerate cone axis"))?;
+            let plane = Plane::new(apex, across, axis).ok_or_else(|| invalid("degenerate cone axis"))?;
+            let profile = Region2 {
+                outer: Loop2::polygon(&[Vec2::new(0., 0.), Vec2::new(depth * half_angle.tan(), depth), Vec2::new(0., depth)]),
+                holes: Vec::new(),
+            };
+            crate::revolve(&plane, &[profile], Vec2::new(0., 0.), Vec2::new(0., 1.), std::f64::consts::TAU)?
+                .into_iter()
+                .next()
+                .ok_or_else(|| invalid("could not build the recognised cone"))
+        }
+        _ => Err(invalid("only cones and spheres are cut as recognised features")),
+    }
 }
 
 fn triangles(mesh: &TriMesh) -> Result<Vec<Tri>> {
@@ -117,7 +164,8 @@ fn triangles(mesh: &TriMesh) -> Result<Vec<Tri>> {
                 return Err(invalid("triangle refers to a missing vertex"));
             };
             let cross = (*pb - *pa).cross(*pc - *pa);
-            let n = cross.normalized().ok_or_else(|| invalid("degenerate triangle"))?;
+            // A zero-area sliver keeps the mesh closed but faces nowhere.
+            let n = cross.normalized().unwrap_or(Vec3::ZERO);
             Ok(Tri { v: *t, n, area: cross.len() * 0.5 })
         })
         .collect()

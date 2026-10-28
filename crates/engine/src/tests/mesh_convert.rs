@@ -172,6 +172,43 @@ fn exported_stl_of_a_milled_part_reconstructs_pockets_and_holes_from_three_sides
     std::fs::remove_file(path).unwrap();
 }
 
+/// Reverse engineering by hand: a pick on an imported mesh recognises the surface there, and
+/// the conversion with the picked drill point builds the bore's cone, which converting the
+/// mesh as it is refuses.
+#[test]
+fn picked_surfaces_are_recognised_and_complete_the_solid() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length":40,"width":30,"height":20,"corner":[0,0,0]}));
+    run(&mut s, "solid.cone", json!({"base":[12,15,8],"axis":[0,0,-1],"radius":4,"top_radius":0,"height":2.4,"operation":"cut"}));
+    run(&mut s, "solid.cylinder", json!({"base":[12,15,8],"radius":4,"height":13,"operation":"cut"}));
+    let expected = solidcraft_kernel::measure(&s.model.state().bodies[0].body).unwrap().volume;
+    let path = std::env::temp_dir().join(format!("solidcraft-mesh-picks-{}.stl", std::process::id()));
+    run(&mut s, "file.save_mesh", json!({"path":path}));
+    run(&mut s, "doc.open", json!({"path":path}));
+    let name = s.model.state().bodies[0].name.clone();
+    let bore = run(&mut s, "mesh.recognize", json!({"body":name,"point":[16,15,14]}));
+    assert_eq!(bore["regions"][0]["kind"], "cylinder", "{bore}");
+    assert!((bore["regions"][0]["surface"]["radius"].as_f64().unwrap() - 4.).abs() < 0.01, "{bore}");
+    assert_eq!(bore["regions"][0]["concave"], true);
+    let tip = run(&mut s, "mesh.recognize", json!({"body":name,"point":[13.5,15,7.2]}));
+    assert_eq!(tip["regions"][0]["kind"], "cone", "{tip}");
+    let all = run(&mut s, "mesh.recognize", json!({"body":name,"all":true}));
+    assert!(all["regions"].as_array().unwrap().len() >= 8, "{all}");
+    assert!(s.execute("mesh.recognize", &json!({"body":name,"point":[30,25,20],"kind":"sphere"})).is_err());
+    assert!(s.execute("mesh.convert", &json!({"body":name})).is_err());
+    run(&mut s, "mesh.convert", json!({"body":name,"picks":[{"point":[13.5,15,7.2],"kind":"cone"}]}));
+    let state = s.model.state();
+    let body = &state.bodies[0].body;
+    assert!(!body.is_mesh());
+    let measured = solidcraft_kernel::measure(body).unwrap();
+    assert!((measured.volume - expected).abs() < 0.5, "{} vs {expected}", measured.volume);
+    assert_eq!(measured.merged.face_types.get("cylinder"), Some(&1), "{:?}", measured.merged.face_types);
+    // The picks are saved with the feature and rebuild after reopening.
+    let saved = s.doc.to_json();
+    assert!(saved.contains("\"picks\""), "{saved}");
+    std::fs::remove_file(path).unwrap();
+}
+
 /// #784: STL is closed as written where faces meet (a fillet, a bored hole): every edge of the
 /// file, keyed by its exact f32 ends, is shared by exactly two triangles, as in 3MF.
 #[test]
