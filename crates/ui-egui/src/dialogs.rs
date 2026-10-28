@@ -95,6 +95,9 @@ const WALL_LABELS: [&str; 4] = ["Center", "Inside", "Outside", "Two Sides"];
 /// What an extrude's first input picks: profiles or planar faces, or curves too when thin.
 const EXTRUDE_ACCEPT: Accept = PROFILES | PLANAR_FACES;
 const THIN_ACCEPT: Accept = PROFILES | CURVES;
+/// The kinds of surface a click on a mesh asks for, and their labels.
+pub(crate) const MESH_KINDS: [&str; 5] = ["auto", "plane", "cylinder", "cone", "sphere"];
+pub(crate) const MESH_KIND_LABELS: [&str; 5] = ["Auto", "Plane", "Cylinder", "Cone", "Sphere"];
 const HOLE_TYPES: [&str; 3] = ["simple", "counterbore", "countersink"];
 const HOLE_LABELS: [&str; 3] = ["Simple", "Counterbore", "Countersink"];
 
@@ -217,9 +220,13 @@ crate::dialog_descriptor::dialog_descriptors! {
             },
             /// Halfway between two planes or planar faces.
             Midplane,
-            /// An imported mesh body rebuilt as editable faces (#3001).
+            /// An imported mesh body rebuilt as editable faces (#3001), optionally guided by
+            /// surfaces clicked on the mesh: `kinds[i]` is the kind asked for at the `i`th click
+            /// (an index into [`MESH_KINDS`]), `found` what was recognised there (point, kind, text).
             MeshConvert {
                 tolerance: String,
+                kinds: Vec<usize>,
+                found: Vec<(Vec3, usize, String)>,
             },
             /// A construction axis, point or plane made from picks alone (#2474): input `i` is the
             /// command's parameter `keys[i]`, and `t` (along a path) when it takes one.
@@ -845,8 +852,8 @@ impl Dialog {
                 vec![SelInput::new("Objects", BODIES, true), SelInput::new("Path", CURVES, true)],
             ),
             "mesh.convert" => Dialog::new(
-                Kind::MeshConvert { tolerance: crate::length_input::model(&s.doc, 0.05) },
-                vec![SelInput::new("Mesh body", BODIES, false)],
+                Kind::MeshConvert { tolerance: crate::length_input::model(&s.doc, 0.05), kinds: Vec::new(), found: Vec::new() },
+                vec![SelInput::new("Mesh body", BODIES, false), SelInput::new("Surfaces", FACES, true)],
             ),
             "construct.plane.midplane" => Dialog::new(
                 Kind::Midplane,
@@ -1511,6 +1518,23 @@ impl Dialog {
         }
         if self.active == 0 && matches!(self.kind, Kind::Extrude { .. } | Kind::Revolve { .. } | Kind::Emboss { .. }) {
             self.profile_selection_changed = true;
+        }
+        // Every click on a mesh body is its one face: each is a surface of its own, kept in
+        // order, not toggled off by the next click.
+        if matches!(self.kind, Kind::MeshConvert { .. })
+            && self.active == 1
+            && let Sel::Face { point, .. } = &sel
+            && let Some(inp) = self.inputs.get_mut(1)
+        {
+            let same = inp.items.iter().position(|x| matches!(x, Sel::Face { point: p, .. } if p.dist(*point) < 1e-9));
+            match same {
+                Some(i) => {
+                    inp.items.remove(i);
+                }
+                None => inp.items.push(sel),
+            }
+            self.focus = true;
+            return;
         }
         let measure = matches!(self.kind, Kind::Measure { .. });
         // The chat's picks stay what was clicked: a rim is one edge there, not its pieces.
@@ -4117,13 +4141,32 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
                 None => ("construct.plane.offset", json!({"base": base})),
             }
         }
-        Kind::MeshConvert { tolerance } => {
-            need(0, "the mesh body")?;
+        Kind::MeshConvert { tolerance, kinds, .. } => {
+            // The mesh body, or the one its surfaces were clicked on.
             let body = match sels(d, 0).first() {
-                Some(Sel::Body { name }) => name.clone(),
-                _ => return Err("pick the mesh body to convert".into()),
+                Some(Sel::Body { name }) => Some(name.clone()),
+                _ => sels(d, 1).iter().find_map(|x| match x {
+                    Sel::Face { body, .. } => Some(body.clone()),
+                    _ => None,
+                }),
             };
-            ("mesh.convert", json!({"body": body, "tolerance": tolerance}))
+            let Some(body) = body else { return Err("pick the mesh body to convert".into()) };
+            let picks: Vec<Value> = sels(d, 1)
+                .iter()
+                .enumerate()
+                .filter_map(|(i, x)| match x {
+                    Sel::Face { body: b, point, .. } if *b == body => Some(json!({
+                        "point": [point.x, point.y, point.z],
+                        "kind": MESH_KINDS.get(kinds.get(i).copied().unwrap_or(0)).copied().unwrap_or("auto"),
+                    })),
+                    _ => None,
+                })
+                .collect();
+            if picks.is_empty() {
+                ("mesh.convert", json!({"body": body, "tolerance": tolerance}))
+            } else {
+                ("mesh.convert", json!({"body": body, "tolerance": tolerance, "picks": picks}))
+            }
         }
         Kind::Midplane => {
             need(0, "the first plane")?;

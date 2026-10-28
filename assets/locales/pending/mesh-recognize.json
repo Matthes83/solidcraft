@@ -1,4 +1,86 @@
 {
-  "en": { "cmd.mesh_recognize": "Recognize Surface" },
-  "de": { "cmd.mesh_recognize": "Fläche erkennen" }
+  "en": {
+    "cmd.mesh_recognize": "Recognize Surface",
+    "Click surfaces on the mesh to have them recognised. Without clicks the mesh converts as it is.": "Click surfaces on the mesh to have them recognised. Without clicks the mesh converts as it is.",
+    "Last surface": "Last surface",
+    "Recognize every surface first": "Recognize every surface first",
+    "Not recognized": "Not recognized",
+    "bore": "bore",
+    "boss": "boss",
+    "triangles": "triangles",
+    "Surfaces": "Surfaces",
+    "Auto": "Auto"
+  },
+  "de": {
+    "cmd.mesh_recognize": "Fläche erkennen",
+    "Click surfaces on the mesh to have them recognised. Without clicks the mesh converts as it is.": "Flächen im Netz anklicken, um sie erkennen zu lassen. Ohne Klick wird das Netz so konvertiert, wie es ist.",
+    "Last surface": "Letzte Fläche",
+    "Recognize every surface first": "Vorher alle Flächen erkennen",
+    "Not recognized": "Nicht erkannt",
+    "bore": "Bohrung",
+    "boss": "Zapfen",
+    "triangles": "Dreiecke",
+    "Surfaces": "Flächen",
+    "Auto": "Auto"
+  },
+  "ar": {
+    "cmd.mesh_recognize": "التعرف على السطح",
+    "Click surfaces on the mesh to have them recognised. Without clicks the mesh converts as it is.": "انقر على أسطح الشبكة للتعرف عليها. بدون نقرات تُحوَّل الشبكة كما هي.",
+    "Last surface": "آخر سطح",
+    "Recognize every surface first": "التعرف على كل الأسطح أولاً",
+    "Not recognized": "لم يُتعرَّف عليه",
+    "bore": "ثقب",
+    "boss": "نتوء",
+    "triangles": "مثلثات",
+    "Surfaces": "الأسطح",
+    "Auto": "تلقائي"
+  },
+  "he": {
+    "cmd.mesh_recognize": "זיהוי משטח",
+    "Click surfaces on the mesh to have them recognised. Without clicks the mesh converts as it is.": "לחצו על משטחים ברשת כדי לזהות אותם. ללא לחיצות הרשת מומרת כפי שהיא.",
+    "Last surface": "משטח אחרון",
+    "Recognize every surface first": "לזהות קודם את כל המשטחים",
+    "Not recognized": "לא זוהה",
+    "bore": "קדח",
+    "boss": "בליטה",
+    "triangles": "משולשים",
+    "Surfaces": "משטחים",
+    "Auto": "אוטומטי"
+  },
+  "ja": {
+    "cmd.mesh_recognize": "サーフェスを認識",
+    "Click surfaces on the mesh to have them recognised. Without clicks the mesh converts as it is.": "メッシュ上のサーフェスをクリックすると認識されます。クリックしない場合、メッシュはそのまま変換されます。",
+    "Last surface": "最後のサーフェス",
+    "Recognize every surface first": "先にすべてのサーフェスを認識",
+    "Not recognized": "認識できません",
+    "bore": "穴",
+    "boss": "ボス",
+    "triangles": "三角形",
+    "Surfaces": "サーフェス",
+    "Auto": "自動"
+  },
+  "vi": {
+    "cmd.mesh_recognize": "Nhận dạng bề mặt",
+    "Click surfaces on the mesh to have them recognised. Without clicks the mesh converts as it is.": "Nhấp vào các bề mặt trên lưới để nhận dạng chúng. Không nhấp thì lưới được chuyển đổi nguyên trạng.",
+    "Last surface": "Bề mặt cuối",
+    "Recognize every surface first": "Nhận dạng mọi bề mặt trước",
+    "Not recognized": "Không nhận dạng được",
+    "bore": "lỗ",
+    "boss": "vấu",
+    "triangles": "tam giác",
+    "Surfaces": "Bề mặt",
+    "Auto": "Tự động"
+  },
+  "zh": {
+    "cmd.mesh_recognize": "识别曲面",
+    "Click surfaces on the mesh to have them recognised. Without clicks the mesh converts as it is.": "单击网格上的曲面以识别它们。不单击则按原样转换网格。",
+    "Last surface": "最后一个曲面",
+    "Recognize every surface first": "先识别所有曲面",
+    "Not recognized": "未识别",
+    "bore": "孔",
+    "boss": "凸台",
+    "triangles": "三角形",
+    "Surfaces": "曲面",
+    "Auto": "自动"
+  }
 }

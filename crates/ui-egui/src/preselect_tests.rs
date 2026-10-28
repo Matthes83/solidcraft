@@ -2525,6 +2525,62 @@ fn point_along_path_has_its_position_and_missing_picks_are_named() {
     assert!(e.contains("path"), "{e}");
 }
 
+/// Reverse engineering by hand: clicks on the mesh in the Convert Mesh dialog are recognised
+/// one by one (the bore as a cylinder of its diameter, the drill point as a cone), and OK
+/// builds the solid from them, which the mesh alone does not convert to.
+#[test]
+fn convert_mesh_recognises_clicked_surfaces_and_builds_the_drill_point() {
+    use solidcraft_engine::doc::{Document, FeatureKind, MeshData};
+    use solidcraft_engine::geom::{Loop2, Plane, Region2, Vec2};
+    use solidcraft_engine::kernel as k;
+    let block = k::box_solid(Vec3::ZERO, Vec3::new(40., 30., 20.)).unwrap();
+    let tip = 4. / 59f64.to_radians().tan();
+    let profile =
+        Region2 { outer: Loop2::polygon(&[Vec2::new(0., 8. - tip), Vec2::new(4., 8.), Vec2::new(4., 21.), Vec2::new(0., 21.)]), holes: Vec::new() };
+    let plane = Plane::new(Vec3::new(12., 15., 0.), Vec3::X, Vec3::Z).unwrap();
+    let bore = k::revolve(&plane, &[profile], Vec2::new(0., 0.), Vec2::new(0., 1.), std::f64::consts::TAU).unwrap().remove(0);
+    let part = k::boolean(&block, &bore, k::BoolOp::Cut).unwrap().unwrap();
+    let mesh = part.tessellate(0.005).unwrap();
+    let mut doc = Document::default();
+    doc.add_feature(
+        FeatureKind::MeshImport {
+            file: "bored.stl".into(),
+            meshes: vec![MeshData {
+                name: "Mesh".into(),
+                positions: mesh.positions.iter().flat_map(|p| [p.x, p.y, p.z]).collect(),
+                triangles: mesh.triangles.iter().flatten().copied().collect(),
+                color: None,
+            }],
+        },
+        Some("Imported mesh"),
+    )
+    .unwrap();
+    let mut h = crate::scenario::Harness::new();
+    h.app.session = Session::new(doc);
+    h.app.session.selection = vec![Sel::Body { name: "Mesh".into() }];
+    h.app.start("mesh.convert");
+    h.frames(1);
+    let d = h.app.dialog.as_mut().unwrap();
+    d.active = 1;
+    let face = |p: Vec3| Sel::Face { body: "Mesh".into(), index: 0, point: p };
+    d.pick(&h.app.session, face(Vec3::new(16., 15., 14.)));
+    d.pick(&h.app.session, face(Vec3::new(13.5, 15., 7.4)));
+    assert_eq!(d.inputs[1].items.len(), 2, "two clicks on one mesh are two surfaces");
+    h.frames(2);
+    let Some(Kind::MeshConvert { found, .. }) = h.app.dialog.as_ref().map(|d| &d.kind) else { panic!("no dialog") };
+    let texts: Vec<&str> = found.iter().map(|f| f.2.as_str()).collect();
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    assert!(texts[0].contains("Ø 8.000") && texts[0].contains("bore"), "{texts:?}");
+    assert!(texts[1].contains("118.") || texts[1].contains("Cone"), "{texts:?}");
+    h.step(&json!({"key":"Enter"})).unwrap();
+    assert!(h.app.dialog.is_none(), "{:?}", h.app.dialog.as_ref().and_then(|d| d.error.clone()));
+    let state = h.app.session.model.state();
+    let body = &state.body("Mesh").unwrap().body;
+    assert!(!body.is_mesh(), "rebuilt as faces");
+    let expected = k::measure(&part).unwrap().volume;
+    assert!((k::measure(body).unwrap().volume - expected).abs() < 0.2);
+}
+
 /// #3001: Convert Mesh opens a dialog instead of failing with "select a mesh body". With the
 /// mesh selected first it takes it, and OK rebuilds it as faces.
 #[test]
