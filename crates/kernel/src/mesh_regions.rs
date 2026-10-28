@@ -40,6 +40,8 @@ pub enum SurfaceKind {
     Cylinder,
     Cone,
     Sphere,
+    /// A ring: a fillet or round swept about an axis.
+    Torus,
 }
 
 impl SurfaceKind {
@@ -50,6 +52,7 @@ impl SurfaceKind {
             "cylinder" => SurfaceKind::Cylinder,
             "cone" => SurfaceKind::Cone,
             "sphere" => SurfaceKind::Sphere,
+            "torus" => SurfaceKind::Torus,
             _ => return None,
         })
     }
@@ -60,10 +63,32 @@ impl SurfaceKind {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Primitive {
-    Plane { point: Vec3, normal: Vec3 },
-    Cylinder { point: Vec3, axis: Vec3, radius: f64 },
-    Cone { apex: Vec3, axis: Vec3, half_angle: f64 },
-    Sphere { center: Vec3, radius: f64 },
+    Plane {
+        point: Vec3,
+        normal: Vec3,
+    },
+    Cylinder {
+        point: Vec3,
+        axis: Vec3,
+        radius: f64,
+    },
+    Cone {
+        apex: Vec3,
+        axis: Vec3,
+        half_angle: f64,
+    },
+    Sphere {
+        center: Vec3,
+        radius: f64,
+    },
+    /// The surface a circle of radius `minor` sweeps, its centre `major` from `center` in the
+    /// plane across `axis`.
+    Torus {
+        center: Vec3,
+        axis: Vec3,
+        major: f64,
+        minor: f64,
+    },
 }
 
 impl Primitive {
@@ -73,6 +98,7 @@ impl Primitive {
             Primitive::Cylinder { .. } => SurfaceKind::Cylinder,
             Primitive::Cone { .. } => SurfaceKind::Cone,
             Primitive::Sphere { .. } => SurfaceKind::Sphere,
+            Primitive::Torus { .. } => SurfaceKind::Torus,
         }
     }
 
@@ -91,6 +117,12 @@ impl Primitive {
                 rho * half_angle.cos() - h * half_angle.sin()
             }
             Primitive::Sphere { center, radius } => p.dist(center) - radius,
+            Primitive::Torus { center, axis, major, minor } => {
+                let w = p - center;
+                let h = w.dot(axis);
+                let rho = (w - axis * h).len();
+                (rho - major).hypot(h) - minor
+            }
         }
     }
 
@@ -108,6 +140,11 @@ impl Primitive {
                 (radial * half_angle.cos() - axis * half_angle.sin()).normalized().unwrap_or(radial)
             }
             Primitive::Sphere { center, .. } => (p - center).normalized().unwrap_or(Vec3::Z),
+            Primitive::Torus { center, axis, major, .. } => {
+                let w = p - center;
+                let radial = (w - axis * w.dot(axis)).normalized().unwrap_or_else(|| axis.any_perp());
+                (p - (center + radial * major)).normalized().unwrap_or(radial)
+            }
         }
     }
 
@@ -523,28 +560,83 @@ fn fit_cone(ctx: &Ctx, tris: &[u32]) -> Option<Primitive> {
     Some(Primitive::Cone { apex, axis, half_angle })
 }
 
+/// A torus: the spine circle is where the facets' normal lines meet it, `minor` in from the
+/// surface. Search `minor` (either side) for the offset points that lie best on one circle,
+/// then refine everything on the vertices.
+fn fit_torus(ctx: &Ctx, tris: &[u32]) -> Option<Primitive> {
+    if tris.len() < 24 {
+        return None;
+    }
+    let samples: Vec<(Vec3, Vec3)> = tris.iter().step_by(tris.len().div_ceil(800).max(1)).map(|t| (ctx.centroid(*t), ctx.normal(*t))).collect();
+    let mut bounds = solidcraft_geom::Aabb3::EMPTY;
+    for (p, _) in &samples {
+        bounds.add(*p);
+    }
+    let extent = bounds.size().len().max(1e-6);
+    // The spine through points offset by `r` along their normals: (circle, residual).
+    let spine = |r: f64| -> Option<(Vec3, Vec3, f64, f64)> {
+        let q: Vec<Vec3> = samples.iter().map(|(p, n)| *p - *n * r).collect();
+        let c = q.iter().fold(Vec3::ZERO, |s, p| s + *p) / q.len() as f64;
+        let mut m: M3 = [[0.; 3]; 3];
+        for p in &q {
+            outer(&mut m, *p - c, 1.);
+        }
+        let axis = eigen(m).first()?.1;
+        let (center, radius) = fit_circle(&q, axis)?;
+        let residual: f64 = q
+            .iter()
+            .map(|p| {
+                let w = *p - center;
+                let h = w.dot(axis);
+                ((w - axis * h).len() - radius).powi(2) + h * h
+            })
+            .sum::<f64>()
+            / q.len() as f64;
+        Some((center, axis, radius, residual))
+    };
+    let mut best: Option<(f64, (Vec3, Vec3, f64, f64))> = None;
+    for k in 1..=120 {
+        let r = extent * 1e-3 * (2000f64).powf(k as f64 / 120.);
+        for r in [r, -r] {
+            if let Some(f) = spine(r)
+                && best.as_ref().is_none_or(|(_, b)| f.3 < b.3)
+            {
+                best = Some((r, f));
+            }
+        }
+    }
+    let (r, (center, axis, major, _)) = best?;
+    let minor = r.abs();
+    if !(major > minor * 1.0001) || !(minor > 0.) {
+        return None;
+    }
+    Some(Primitive::Torus { center, axis, major, minor })
+}
+
 fn fit(ctx: &Ctx, kind: SurfaceKind, tris: &[u32]) -> Option<Primitive> {
     let first = match kind {
         SurfaceKind::Plane | SurfaceKind::Auto => fit_plane(ctx, tris),
         SurfaceKind::Cylinder => fit_cylinder(ctx, tris),
         SurfaceKind::Cone => fit_cone(ctx, tris),
         SurfaceKind::Sphere => fit_sphere(ctx, tris),
+        SurfaceKind::Torus => fit_torus(ctx, tris),
     }?;
     Some(refine(first, &vertices(ctx, tris)))
 }
 
 /// The surface's parameters as a vector (and back): what least squares adjusts.
-fn params(s: &Primitive) -> [f64; 7] {
+fn params(s: &Primitive) -> [f64; 8] {
     match *s {
-        Primitive::Plane { point, normal } => [point.x, point.y, point.z, normal.x, normal.y, normal.z, 0.],
-        Primitive::Cylinder { point, axis, radius } => [point.x, point.y, point.z, axis.x, axis.y, axis.z, radius],
-        Primitive::Cone { apex, axis, half_angle } => [apex.x, apex.y, apex.z, axis.x, axis.y, axis.z, half_angle],
-        Primitive::Sphere { center, radius } => [center.x, center.y, center.z, radius, 0., 0., 0.],
+        Primitive::Plane { point, normal } => [point.x, point.y, point.z, normal.x, normal.y, normal.z, 0., 0.],
+        Primitive::Cylinder { point, axis, radius } => [point.x, point.y, point.z, axis.x, axis.y, axis.z, radius, 0.],
+        Primitive::Cone { apex, axis, half_angle } => [apex.x, apex.y, apex.z, axis.x, axis.y, axis.z, half_angle, 0.],
+        Primitive::Sphere { center, radius } => [center.x, center.y, center.z, radius, 0., 0., 0., 0.],
+        Primitive::Torus { center, axis, major, minor } => [center.x, center.y, center.z, axis.x, axis.y, axis.z, major, minor],
     }
 }
 
-fn with_params(s: &Primitive, p: &[f64; 7]) -> Option<Primitive> {
-    let [x, y, z, a, b, c, d] = *p;
+fn with_params(s: &Primitive, p: &[f64; 8]) -> Option<Primitive> {
+    let [x, y, z, a, b, c, d, e] = *p;
     let point = Vec3::new(x, y, z);
     let dir = || Vec3::new(a, b, c).normalized();
     let out = match s {
@@ -552,6 +644,7 @@ fn with_params(s: &Primitive, p: &[f64; 7]) -> Option<Primitive> {
         Primitive::Cylinder { .. } => Primitive::Cylinder { point, axis: dir()?, radius: d },
         Primitive::Cone { .. } => Primitive::Cone { apex: point, axis: dir()?, half_angle: d },
         Primitive::Sphere { .. } => Primitive::Sphere { center: point, radius: a },
+        Primitive::Torus { .. } => Primitive::Torus { center: point, axis: dir()?, major: d, minor: e },
     };
     params(&out).iter().all(|v| v.is_finite()).then_some(out)
 }
@@ -571,10 +664,10 @@ fn refine(s: Primitive, pts: &[Vec3]) -> Primitive {
     for _ in 0..30 {
         let p0 = params(&best);
         let scale = p0.iter().take(3).map(|v| v.abs()).fold(1f64, f64::max);
-        let mut jt_j = [[0.; 7]; 7];
-        let mut jt_r = [0.; 7];
-        let mut columns: Vec<Vec<f64>> = Vec::with_capacity(7);
-        for k in 0..7 {
+        let mut jt_j = [[0.; 8]; 8];
+        let mut jt_r = [0.; 8];
+        let mut columns: Vec<Vec<f64>> = Vec::with_capacity(8);
+        for k in 0..8 {
             let h = if k < 3 { 1e-7 * scale } else { 1e-7 };
             let mut q = p0;
             if let Some(v) = q.get_mut(k) {
@@ -587,8 +680,8 @@ fn refine(s: Primitive, pts: &[Vec3]) -> Primitive {
             columns.push(col);
         }
         let residual: Vec<f64> = sample.iter().map(|p| best.signed_distance(*p)).collect();
-        for i in 0..7 {
-            for j in 0..7 {
+        for i in 0..8 {
+            for j in 0..8 {
                 let (Some(ci), Some(cj)) = (columns.get(i), columns.get(j)) else { continue };
                 if let Some(c) = jt_j.get_mut(i).and_then(|r| r.get_mut(j)) {
                     *c = ci.iter().zip(cj).map(|(a, b)| a * b).sum();
@@ -603,7 +696,8 @@ fn refine(s: Primitive, pts: &[Vec3]) -> Primitive {
             let mut a = jt_j;
             for (i, row) in a.iter_mut().enumerate() {
                 if let Some(d) = row.get_mut(i) {
-                    *d += lambda * (*d).max(1e-12) + 1e-15;
+                    // A parameter the surface doesn't use stays where it is.
+                    *d = if *d == 0. { 1. } else { *d + lambda * (*d).max(1e-12) + 1e-15 };
                 }
             }
             let Some(delta) = solve(a, jt_r) else { break };
@@ -679,11 +773,12 @@ pub(crate) fn grow(ctx: &Ctx, seed: u32, want: SurfaceKind, tol: f64, claimed: &
         return None;
     }
     let kinds: &[SurfaceKind] = match want {
-        SurfaceKind::Auto => &[SurfaceKind::Plane, SurfaceKind::Cylinder, SurfaceKind::Cone, SurfaceKind::Sphere],
+        SurfaceKind::Auto => &[SurfaceKind::Plane, SurfaceKind::Cylinder, SurfaceKind::Cone, SurfaceKind::Sphere, SurfaceKind::Torus],
         SurfaceKind::Plane => &[SurfaceKind::Plane],
         SurfaceKind::Cylinder => &[SurfaceKind::Cylinder],
         SurfaceKind::Cone => &[SurfaceKind::Cone],
         SurfaceKind::Sphere => &[SurfaceKind::Sphere],
+        SurfaceKind::Torus => &[SurfaceKind::Torus],
     };
     let near = neighbourhood(ctx, seed, &free, 96);
     let mut start: Option<(Primitive, usize)> = None;
@@ -746,13 +841,44 @@ pub(crate) fn grow(ctx: &Ctx, seed: u32, want: SurfaceKind, tol: f64, claimed: &
             Some(s) if s != surface && added > 0 => {
                 surface = s;
                 fitted_at = patch.len();
+                continue;
             }
-            Some(s) => {
-                surface = s;
-                break;
-            }
-            None => break,
+            Some(s) => surface = s,
+            None => {}
         }
+        // Stopped: does a richer kind fit the region with its smooth neighbours (a fillet that
+        // looked like a cylinder over its first few facets is a torus all round)?
+        // A plane stops where its flat face ends; only curved regions move on.
+        if want != SurfaceKind::Auto || surface.kind() == SurfaceKind::Plane {
+            break;
+        }
+        let mut ring: Vec<u32> = Vec::new();
+        for &t in &patch {
+            for &u in ctx.neighbours(t) {
+                if free(u) && !in_patch.get(u as usize).copied().unwrap_or(true) && ctx.normal(t).dot(ctx.normal(u)) >= SMOOTH_FOLD.to_radians().cos()
+                {
+                    ring.push(u);
+                }
+            }
+        }
+        ring.sort_unstable();
+        ring.dedup();
+        if ring.is_empty() {
+            break;
+        }
+        let rank = |k: SurfaceKind| kinds.iter().position(|x| *x == k).unwrap_or(0);
+        let mut grown = patch.clone();
+        grown.extend_from_slice(&ring);
+        let richer = kinds.iter().skip(rank(surface.kind()) + 1).find_map(|k| fit(ctx, *k, &grown).filter(|s| deviation(ctx, s, &grown, tol) <= tol));
+        let Some(s) = richer else { break };
+        surface = s;
+        for u in &ring {
+            if let Some(p) = in_patch.get_mut(*u as usize) {
+                *p = true;
+            }
+        }
+        patch = grown;
+        fitted_at = patch.len();
     }
     let pts = vertices(ctx, &patch);
     let (mut worst, mut sum) = (0f64, 0f64);
@@ -781,7 +907,7 @@ fn regularize(regions: &mut [MeshRegion], tolerance: f64) {
     let close = 0.5f64.to_radians();
     let direction = |s: &Primitive| match *s {
         Primitive::Plane { normal, .. } => Some(normal),
-        Primitive::Cylinder { axis, .. } | Primitive::Cone { axis, .. } => Some(axis),
+        Primitive::Cylinder { axis, .. } | Primitive::Cone { axis, .. } | Primitive::Torus { axis, .. } => Some(axis),
         Primitive::Sphere { .. } => None,
     };
     // Directions by the area behind them, largest first.
@@ -814,6 +940,7 @@ fn regularize(regions: &mut [MeshRegion], tolerance: f64) {
                 Primitive::Plane { point, .. } => Primitive::Plane { point, normal: e },
                 Primitive::Cylinder { point, radius, .. } => Primitive::Cylinder { point, axis: e, radius },
                 Primitive::Cone { apex, half_angle, .. } => Primitive::Cone { apex, axis: e, half_angle },
+                Primitive::Torus { center, major, minor, .. } => Primitive::Torus { center, axis: e, major, minor },
                 other => other,
             };
         }
@@ -876,11 +1003,12 @@ pub(crate) fn snap_to_picks(
         }
         let region = grow(&ctx, seed, *kind, tolerance, &claimed).ok_or_else(|| {
             let what = match kind {
-                SurfaceKind::Auto => "no plane, cylinder, cone or sphere",
+                SurfaceKind::Auto => "no plane, cylinder, cone, sphere or torus",
                 SurfaceKind::Plane => "no plane",
                 SurfaceKind::Cylinder => "no cylinder",
                 SurfaceKind::Cone => "no cone",
                 SurfaceKind::Sphere => "no sphere",
+                SurfaceKind::Torus => "no torus",
             };
             invalid(&format!("pick {}: {what} fits the mesh there within {tolerance} mm", i + 1))
         })?;
@@ -1012,7 +1140,7 @@ pub(crate) fn snap_to_picks(
 ///
 /// Each surface is regularised as for [`crate::convert_mesh_with_regions`] (directions within
 /// half a degree made exact), so blocks and bores meet square. The mesh is not changed.
-pub fn fit_bodies(body: &Body, tolerance: f64, picks: &[(Vec3, SurfaceKind)], surfaces: bool) -> Result<Vec<(String, Body)>> {
+pub fn fit_bodies(body: &Body, tolerance: f64, picks: &[(Vec3, SurfaceKind)], surfaces: bool, round: f64) -> Result<Vec<(String, Body)>> {
     crate::guard("fit bodies to mesh surfaces", || {
         checked_tolerance(tolerance)?;
         if picks.is_empty() || picks.len() > 10_000 || picks.iter().any(|(p, _)| !p.is_finite()) {
@@ -1022,6 +1150,7 @@ pub fn fit_bodies(body: &Body, tolerance: f64, picks: &[(Vec3, SurfaceKind)], su
         let n = ctx.triangles.len();
         let mut regions = picked_regions(&ctx, picks, tolerance)?;
         regularize(&mut regions, tolerance);
+        round_sizes(&mut regions, round, tolerance);
         let all = vertices(&ctx, &(0..n).filter_map(|t| u32::try_from(t).ok()).collect::<Vec<_>>());
         let mut bounds = solidcraft_geom::Aabb3::EMPTY;
         for p in &all {
@@ -1078,6 +1207,14 @@ pub fn fit_bodies(body: &Body, tolerance: f64, picks: &[(Vec3, SurfaceKind)], su
                     (format!("Cone {:.1}°", 2. * half_angle.to_degrees()), solid)
                 }
                 Primitive::Sphere { center, radius } => (format!("Sphere R{radius:.3}"), crate::sphere(center, radius)?),
+                Primitive::Torus { center, axis, major, minor } => {
+                    let ring = crate::torus(Vec3::ZERO, major, minor)?;
+                    // Turn the model's Z onto the axis, then move to the centre.
+                    let turn = Vec3::Z.cross(axis);
+                    let angle = turn.len().atan2(Vec3::Z.dot(axis));
+                    let ring = crate::transform(&ring, center, Vec3::ZERO, turn.normalized().unwrap_or(Vec3::X), angle)?;
+                    (format!("Torus R{major:.3} r{minor:.3}"), ring)
+                }
             };
             out.push((name, solid));
         }
@@ -1214,6 +1351,7 @@ fn surface_sheet(ctx: &Ctx, region: &MeshRegion, tolerance: f64) -> Result<(Stri
         }
         Primitive::Cone { .. } => Err(invalid("cone surfaces are not supported yet; make the cone a body instead")),
         Primitive::Sphere { .. } => Err(invalid("sphere surfaces are not supported yet; make the sphere a body instead")),
+        Primitive::Torus { .. } => Err(invalid("torus surfaces are not supported yet; make the torus a body instead")),
     }
 }
 
@@ -1226,6 +1364,7 @@ pub fn surface_outline(
     point: Vec3,
     kind: SurfaceKind,
     tolerance: f64,
+    round: f64,
 ) -> Result<(solidcraft_geom::Plane, Vec<solidcraft_geom::Region2>)> {
     use solidcraft_geom::{Loop2, Region2, Vec2};
     crate::guard("outline a mesh surface", || {
@@ -1236,6 +1375,7 @@ pub fn surface_outline(
         let ctx = context(body, tolerance)?;
         let mut regions = picked_regions(&ctx, &[(point, kind)], tolerance)?;
         regularize(&mut regions, tolerance);
+        round_sizes(&mut regions, round, tolerance);
         let region = regions.first().ok_or_else(|| invalid("nothing recognised there"))?;
         let own = vertices(&ctx, &region.triangles);
         match region.surface {
@@ -1256,7 +1396,248 @@ pub fn surface_outline(
                 Ok((plane, vec![Region2 { outer: Loop2::circle(Vec2::new(0., 0.), at * half_angle.tan()), holes: Vec::new() }]))
             }
             Primitive::Sphere { .. } => Err(invalid("a sphere has no outline to sketch")),
+            Primitive::Torus { center, axis, major, .. } => {
+                let plane = solidcraft_geom::Plane::from_normal(center, axis).ok_or_else(|| invalid("degenerate axis"))?;
+                Ok((plane, vec![Region2 { outer: Loop2::circle(Vec2::new(0., 0.), major), holes: Vec::new() }]))
+            }
         }
+    })
+}
+
+/// The rigid move that puts a mesh square to the model axes: its largest flat face down on XY
+/// (its normal along -Z), the largest direction square to that along X, and the corner of its
+/// box at the origin (or, with `centred`, the middle of the box at the origin and its bottom on
+/// XY). Without a flat face the largest axis (of a bore, a boss) goes along Z. Returned as
+/// [`crate::transform`] takes it: (translation, rotation axis, angle in radians), rotating
+/// about the origin first.
+pub fn align_to_axes(body: &Body, tolerance: f64, centred: bool) -> Result<(Vec3, Vec3, f64)> {
+    crate::guard("align a mesh to the model axes", || {
+        checked_tolerance(tolerance)?;
+        let mut regions = recognize_all(body, tolerance)?;
+        regularize_directions_only(&mut regions);
+        // Directions by the area behind them; a plane's (with its outward normal) and an axis's.
+        let mut votes: Vec<(Vec3, f64, bool)> = Vec::new();
+        for r in &regions {
+            let (d, flat) = match r.surface {
+                Primitive::Plane { normal, .. } => (normal, true),
+                Primitive::Cylinder { axis, .. } | Primitive::Cone { axis, .. } | Primitive::Torus { axis, .. } => (axis, false),
+                Primitive::Sphere { .. } => continue,
+            };
+            match votes.iter_mut().find(|v| v.0.dot(d).abs() > 0.5f64.to_radians().cos()) {
+                Some(v) => v.1 += r.area,
+                None => votes.push((d, r.area, flat)),
+            }
+        }
+        votes.sort_by(|a, b| b.1.total_cmp(&a.1));
+        // The largest flat face lies down: its outward normal becomes -Z.
+        let largest_plane = regions
+            .iter()
+            .filter_map(|r| match r.surface {
+                Primitive::Plane { normal, .. } => Some((normal, r.area)),
+                _ => None,
+            })
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+        let z = match largest_plane {
+            Some((n, _)) => -n,
+            None => votes.first().map(|v| v.0).ok_or_else(|| invalid("no surface recognised to align by"))?,
+        };
+        let x = votes
+            .iter()
+            .map(|v| v.0)
+            .find(|d| d.dot(z).abs() < 1f64.to_radians().sin())
+            .and_then(|d| (d - z * d.dot(z)).normalized())
+            .or_else(|| z.any_perp().normalized())
+            .ok_or_else(|| invalid("degenerate direction"))?;
+        let y = z.cross(x);
+        // Rows x, y, z: the rotation taking the part's frame onto the model's.
+        let m = [[x.x, x.y, x.z], [y.x, y.y, y.z], [z.x, z.y, z.z]];
+        let get = |i: usize, j: usize| m.get(i).and_then(|r| r.get(j)).copied().unwrap_or(0.);
+        let trace = get(0, 0) + get(1, 1) + get(2, 2);
+        let angle = ((trace - 1.) / 2.).clamp(-1., 1.).acos();
+        let axis = if angle < 1e-9 {
+            Vec3::Z
+        } else if (std::f64::consts::PI - angle).abs() < 1e-6 {
+            // A half turn: the axis from the diagonal.
+            let d = |i: usize| ((get(i, i) + 1.) / 2.).max(0.).sqrt();
+            let mut a = Vec3::new(d(0), d(1), d(2));
+            if get(0, 1) < 0. {
+                a.y = -a.y;
+            }
+            if get(0, 2) < 0. {
+                a.z = -a.z;
+            }
+            a.normalized().unwrap_or(Vec3::Z)
+        } else {
+            Vec3::new(get(2, 1) - get(1, 2), get(0, 2) - get(2, 0), get(1, 0) - get(0, 1)).normalized().unwrap_or(Vec3::Z)
+        };
+        let mesh = body.mesh.as_ref().ok_or_else(|| invalid("select a mesh body"))?;
+        let mut b = solidcraft_geom::Aabb3::EMPTY;
+        for p in &mesh.positions {
+            b.add(Vec3::new(p.dot(x), p.dot(y), p.dot(z)));
+        }
+        let t = if centred { Vec3::new(-(b.min.x + b.max.x) / 2., -(b.min.y + b.max.y) / 2., -b.min.z) } else { -b.min };
+        Ok((t, axis, angle))
+    })
+}
+
+/// [`regularize`]'s direction step alone (no plane offsets moved).
+fn regularize_directions_only(regions: &mut [MeshRegion]) {
+    regularize(regions, 0.);
+}
+
+/// Sizes rounded to `grid` mm where that moves them by no more than `tolerance`: radii and
+/// minor radii, the offsets of planes square to a model axis, and the positions of axes along
+/// a model axis. Design intent: 7.98 measured is 8.00 drawn.
+fn round_sizes(regions: &mut [MeshRegion], grid: f64, tolerance: f64) {
+    if !(grid > 0. && grid.is_finite()) {
+        return;
+    }
+    let round = |v: f64| {
+        let r = (v / grid).round() * grid;
+        if (r - v).abs() <= tolerance { r } else { v }
+    };
+    let on_axis = |d: Vec3| [Vec3::X, Vec3::Y, Vec3::Z].into_iter().any(|a| d.dot(a).abs() > 1. - 1e-12);
+    // Points across an axis-aligned direction: their coordinates across it rounded.
+    let across = |p: Vec3, d: Vec3| {
+        let keep = |c: f64, k: f64| if k.abs() > 1. - 1e-12 { c } else { round(c) };
+        if on_axis(d) { Vec3::new(keep(p.x, d.x), keep(p.y, d.y), keep(p.z, d.z)) } else { p }
+    };
+    for r in regions.iter_mut() {
+        r.surface = match r.surface {
+            Primitive::Plane { point, normal } if on_axis(normal) => {
+                let along = point.dot(normal);
+                Primitive::Plane { point: point + normal * (round(along) - along), normal }
+            }
+            Primitive::Cylinder { point, axis, radius } => Primitive::Cylinder { point: across(point, axis), axis, radius: round(radius) },
+            Primitive::Cone { apex, axis, half_angle } => Primitive::Cone { apex: across(apex, axis), axis, half_angle },
+            Primitive::Sphere { center, radius } => Primitive::Sphere { center, radius: round(radius) },
+            Primitive::Torus { center, axis, major, minor } => {
+                Primitive::Torus { center: across(center, axis), axis, major: round(major), minor: round(minor) }
+            }
+            other => other,
+        };
+    }
+}
+
+/// How far a mesh lies from a solid made from it: every vertex's distance to the solid's
+/// surface, negative where the vertex is inside the solid (the solid has material the mesh
+/// doesn't), positive where it is outside (the solid lacks material).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Deviation {
+    pub max: f64,
+    pub mean: f64,
+    pub rms: f64,
+    /// Share of the vertices within the tolerance, 0..=1.
+    pub within: f64,
+    pub vertices: usize,
+    /// The farthest vertices: (point, signed distance), farthest first.
+    pub worst: Vec<(Vec3, f64)>,
+}
+
+/// [`Deviation`] of `mesh`'s vertices from `solid`, against `tolerance` mm.
+pub fn mesh_deviation(solid: &Body, mesh: &Body, tolerance: f64) -> Result<Deviation> {
+    crate::guard("mesh deviation", || {
+        checked_tolerance(tolerance)?;
+        if solid.is_mesh() {
+            return Err(invalid("compare a solid body with the mesh"));
+        }
+        let input = mesh.mesh.as_ref().ok_or_else(|| invalid("the second body must be a mesh"))?;
+        let surface = solid.tessellate_with((tolerance * 0.1).max(1e-4), true)?;
+        let inside = surface.inside_index();
+        let tris: Vec<[Vec3; 3]> = surface
+            .triangles
+            .iter()
+            .filter_map(|t| {
+                Some([*surface.positions.get(t[0] as usize)?, *surface.positions.get(t[1] as usize)?, *surface.positions.get(t[2] as usize)?])
+            })
+            .collect();
+        if tris.is_empty() {
+            return Err(invalid("the solid has no surface"));
+        }
+        // A grid over the solid's triangles for nearest-point queries.
+        let mut b = solidcraft_geom::Aabb3::EMPTY;
+        for t in &tris {
+            for p in t {
+                b.add(*p);
+            }
+        }
+        let cell = (b.size().len() / 48.).max(1e-6);
+        let key =
+            |p: Vec3| (((p.x - b.min.x) / cell).floor() as i64, ((p.y - b.min.y) / cell).floor() as i64, ((p.z - b.min.z) / cell).floor() as i64);
+        let mut grid = std::collections::HashMap::<(i64, i64, i64), Vec<u32>>::new();
+        for (i, t) in tris.iter().enumerate() {
+            let (lo, hi) = t.iter().fold(
+                (Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY), Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY)),
+                |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+            );
+            let (a, z) = (key(lo), key(hi));
+            if (z.0 - a.0 + 1) * (z.1 - a.1 + 1) * (z.2 - a.2 + 1) > 4096 {
+                continue;
+            }
+            for x in a.0..=z.0 {
+                for y in a.1..=z.1 {
+                    for w in a.2..=z.2 {
+                        grid.entry((x, y, w)).or_default().push(u32::try_from(i).unwrap_or(u32::MAX));
+                    }
+                }
+            }
+        }
+        let nearest = |p: Vec3| -> f64 {
+            let k = key(p);
+            let mut best = f64::INFINITY;
+            for ring in 0..64i64 {
+                if best <= (ring as f64 - 1.).max(0.) * cell {
+                    break;
+                }
+                for x in k.0 - ring..=k.0 + ring {
+                    for y in k.1 - ring..=k.1 + ring {
+                        for w in k.2 - ring..=k.2 + ring {
+                            if (x - k.0).abs().max((y - k.1).abs()).max((w - k.2).abs()) != ring {
+                                continue;
+                            }
+                            for t in grid.get(&(x, y, w)).into_iter().flatten() {
+                                if let Some([a, bb, c]) = tris.get(*t as usize) {
+                                    best = best.min(closest_on_triangle(p, *a, *bb, *c).dist(p));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            best
+        };
+        let step = input.positions.len().div_ceil(20_000).max(1);
+        let mut all: Vec<(Vec3, f64)> = Vec::new();
+        for p in input.positions.iter().step_by(step) {
+            let d = nearest(*p);
+            if d.is_finite() {
+                all.push((*p, if inside.contains(*p) && d > tolerance * 0.01 { -d } else { d }));
+            }
+        }
+        let n = all.len().max(1) as f64;
+        let max = all.iter().map(|(_, d)| d.abs()).fold(0., f64::max);
+        let mean = all.iter().map(|(_, d)| d.abs()).sum::<f64>() / n;
+        let rms = (all.iter().map(|(_, d)| d * d).sum::<f64>() / n).sqrt();
+        let within = all.iter().filter(|(_, d)| d.abs() <= tolerance).count() as f64 / n;
+        all.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()));
+        all.truncate(10);
+        Ok(Deviation { max, mean, rms, within, vertices: n as usize, worst: all })
+    })
+}
+
+/// The section of a mesh body by `plane` as fitted lines, arcs and circles in its coordinates
+/// (no facets), for a sketch on that plane.
+pub fn section_outline(body: &Body, plane: &solidcraft_geom::Plane, tolerance: f64) -> Result<Vec<solidcraft_geom::Region2>> {
+    crate::guard("section a mesh", || {
+        checked_tolerance(tolerance)?;
+        let input = body.mesh.as_ref().ok_or_else(|| invalid("select a mesh body"))?;
+        let welded = crate::mesh_convert::weld(input, tolerance)?;
+        let mesh = welded.mesh.as_ref().ok_or_else(|| invalid("empty mesh"))?;
+        let regions = crate::mesh_convert_milled::section_outline(mesh, plane, tolerance)?;
+        if regions.is_empty() {
+            return Err(invalid("the plane does not cut the mesh"));
+        }
+        Ok(regions)
     })
 }
 
@@ -1311,11 +1692,12 @@ pub fn recognize_region(body: &Body, point: Vec3, kind: SurfaceKind, tolerance: 
         let claimed = vec![false; ctx.triangles.len()];
         grow(&ctx, seed, kind, tolerance, &claimed).ok_or_else(|| {
             let what = match kind {
-                SurfaceKind::Auto => "no plane, cylinder, cone or sphere",
+                SurfaceKind::Auto => "no plane, cylinder, cone, sphere or torus",
                 SurfaceKind::Plane => "no plane",
                 SurfaceKind::Cylinder => "no cylinder",
                 SurfaceKind::Cone => "no cone",
                 SurfaceKind::Sphere => "no sphere",
+                SurfaceKind::Torus => "no torus",
             };
             invalid(&format!("{what} fits the mesh around that point within {tolerance} mm"))
         })
@@ -1504,7 +1886,7 @@ mod tests {
             (Vec3::new(13.5, 15., 7.4), SurfaceKind::Auto),
             (Vec3::new(28., 2.5, 10.5), SurfaceKind::Auto),
         ];
-        let bodies = fit_bodies(&mesh, 0.02, &picks, false).unwrap();
+        let bodies = fit_bodies(&mesh, 0.02, &picks, false, 0.).unwrap();
         let names: Vec<&str> = bodies.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["Plane", "Cylinder Ø8.000", "Cone 118.0°", "Sphere R5.000"], "{names:?}");
         // The top face's block lies under z = 20 across the whole part.
@@ -1516,9 +1898,9 @@ mod tests {
         // Cutting the bore and the drill point from the top block leaves the part's hole.
         let cut = crate::boolean(&bodies[0].1, &bodies[1].1, BoolOp::Cut).unwrap().unwrap();
         assert!(crate::measure(&cut).unwrap().volume < crate::measure(&bodies[0].1).unwrap().volume);
-        assert!(fit_bodies(&mesh, 0.02, &[], false).is_err());
+        assert!(fit_bodies(&mesh, 0.02, &[], false, 0.).is_err());
         // As surfaces: the top face inside its outline (with the bore's hole), the bore's wall.
-        let sheets = fit_bodies(&mesh, 0.02, &picks[..2], true).unwrap();
+        let sheets = fit_bodies(&mesh, 0.02, &picks[..2], true, 0.).unwrap();
         assert_eq!(sheets[0].0, "Plane surface");
         let area = crate::measure(&sheets[0].1).unwrap().area;
         assert!((area - (1200. - std::f64::consts::PI * 16.)).abs() < 0.5, "{area}");
@@ -1526,7 +1908,7 @@ mod tests {
         assert!((wall - std::f64::consts::TAU * 4. * 12.).abs() < 0.5, "{wall}");
         assert_eq!(crate::measure(&sheets[1].1).unwrap().merged.face_types.get("cylinder"), Some(&1));
         // The top face's outline as a sketch: the rectangle and the bore's circle, no facets.
-        let (plane, outline) = surface_outline(&mesh, Vec3::new(30., 25., 20.), SurfaceKind::Auto, 0.02).unwrap();
+        let (plane, outline) = surface_outline(&mesh, Vec3::new(30., 25., 20.), SurfaceKind::Auto, 0.02, 0.).unwrap();
         assert!((plane.normal().z - 1.).abs() < 1e-9);
         assert_eq!(outline.len(), 1);
         assert_eq!(outline[0].outer.segs.len(), 4, "{:?}", outline[0].outer.segs);
@@ -1536,8 +1918,89 @@ mod tests {
             "{:?}",
             outline[0].holes[0].segs
         );
-        let (_, circle) = surface_outline(&mesh, Vec3::new(16., 15., 14.), SurfaceKind::Auto, 0.02).unwrap();
+        let (_, circle) = surface_outline(&mesh, Vec3::new(16., 15., 14.), SurfaceKind::Auto, 0.02, 0.).unwrap();
         assert!((circle[0].area() - std::f64::consts::PI * 16.).abs() < 1e-3);
+    }
+
+    #[test]
+    fn fillets_are_recognised_as_tori() {
+        // A disc of radius 20 with a 3 mm round on its top edge.
+        let disc = crate::cylinder(Vec3::ZERO, Vec3::Z, 20., 10.).unwrap();
+        let edges = disc.edges(0.01).unwrap();
+        let top: Vec<Vec3> = edges.iter().filter(|e| e.points.iter().all(|p| (p.z - 10.).abs() < 1e-6)).map(|e| e.mid).collect();
+        let rounded = crate::fillet(&disc, &top, 3.).unwrap();
+        let mesh = mesh_of(&rounded);
+        let r = recognize_region(&mesh, Vec3::new(19.1, 0., 9.1), SurfaceKind::Auto, 0.02).unwrap();
+        let Primitive::Torus { major, minor, axis, center } = r.surface else { panic!("{:?}", r.surface) };
+        assert!((major - 17.).abs() < 0.01 && (minor - 3.).abs() < 0.01, "{major} {minor}");
+        assert!(axis.z.abs() > 0.9999 && (center.z - 7.).abs() < 0.01, "{axis:?} {center:?}");
+        assert!(!r.concave);
+        let bodies = fit_bodies(&mesh, 0.02, &[(Vec3::new(19.1, 0., 9.1), SurfaceKind::Auto)], false, 0.).unwrap();
+        assert!(bodies[0].0.starts_with("Torus"), "{}", bodies[0].0);
+        let bb = crate::measure(&bodies[0].1).unwrap().bbox;
+        assert!((bb.max.z - 10.).abs() < 0.02 && (bb.max.x - 20.).abs() < 0.02, "{bb:?}");
+    }
+
+    #[test]
+    fn a_turned_mesh_is_put_square_on_the_model_axes() {
+        let block = crate::box_solid(Vec3::ZERO, Vec3::new(40., 30., 10.)).unwrap();
+        let bore = crate::cylinder(Vec3::new(20., 15., -1.), Vec3::Z, 4., 12.).unwrap();
+        let part = cut(&block, &bore);
+        let turned = crate::transform(&part, Vec3::new(5., -7., 3.), Vec3::ZERO, Vec3::new(1., 2., 3.), 0.8).unwrap();
+        let mesh = mesh_of(&turned);
+        let (t, axis, angle) = align_to_axes(&mesh, 0.02, false).unwrap();
+        let moved = crate::transform(&mesh, t, Vec3::ZERO, axis, angle).unwrap();
+        let bb = crate::measure(&moved).unwrap().bbox;
+        let size = bb.size();
+        let mut dims = [size.x, size.y, size.z];
+        dims.sort_by(f64::total_cmp);
+        assert!((bb.min.x).abs() < 1e-6 && bb.min.y.abs() < 1e-6 && bb.min.z.abs() < 1e-6, "{bb:?}");
+        assert!((dims[0] - 10.).abs() < 1e-3 && (dims[1] - 30.).abs() < 1e-3 && (dims[2] - 40.).abs() < 1e-3, "{dims:?}");
+        assert!((size.z - 10.).abs() < 1e-3, "the largest face lies on XY: {size:?}");
+    }
+
+    #[test]
+    fn sizes_round_to_the_grid_within_the_tolerance() {
+        let block = crate::box_solid(Vec3::ZERO, Vec3::new(40., 30., 10.)).unwrap();
+        let bore = crate::cylinder(Vec3::new(20., 15., -1.), Vec3::Z, 3.99, 12.).unwrap();
+        let mesh = mesh_of(&cut(&block, &bore));
+        let pick = [(Vec3::new(23.99, 15., 5.), SurfaceKind::Auto)];
+        let exact = fit_bodies(&mesh, 0.05, &pick, false, 0.).unwrap();
+        assert_eq!(exact[0].0, "Cylinder Ø7.980");
+        let rounded = fit_bodies(&mesh, 0.05, &pick, false, 0.05).unwrap();
+        assert_eq!(rounded[0].0, "Cylinder Ø8.000");
+        // Not when rounding would move the size by more than the tolerance.
+        let coarse = fit_bodies(&mesh, 0.005, &pick, false, 1.).unwrap();
+        assert_eq!(coarse[0].0, "Cylinder Ø7.980");
+    }
+
+    #[test]
+    fn deviation_measures_a_solid_against_its_mesh() {
+        let block = crate::box_solid(Vec3::ZERO, Vec3::new(40., 30., 10.)).unwrap();
+        let bore = crate::cylinder(Vec3::new(20., 15., -1.), Vec3::Z, 4., 12.).unwrap();
+        let part = cut(&block, &bore);
+        let mesh = mesh_of(&part);
+        let same = mesh_deviation(&part, &mesh, 0.05).unwrap();
+        assert!(same.max < 0.01 && same.within > 0.999, "{same:?}");
+        // The block without its bore: the bore's vertices lie inside, 0 .. 4 mm deep.
+        let solid = mesh_deviation(&block, &mesh, 0.05).unwrap();
+        assert!(solid.max > 3.9 && solid.worst[0].1 < 0., "{:?}", solid.worst.first());
+        assert!(solid.within < 0.95);
+        assert!(mesh_deviation(&mesh, &mesh, 0.05).is_err());
+    }
+
+    #[test]
+    fn a_section_sketches_without_facets() {
+        let block = crate::box_solid(Vec3::ZERO, Vec3::new(40., 30., 10.)).unwrap();
+        let bore = crate::cylinder(Vec3::new(20., 15., -1.), Vec3::Z, 4., 12.).unwrap();
+        let mesh = mesh_of(&cut(&block, &bore));
+        let plane = solidcraft_geom::Plane::XY.offset(5.);
+        let regions = section_outline(&mesh, &plane, 0.02).unwrap();
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].outer.segs.len(), 4);
+        assert_eq!(regions[0].holes.len(), 1);
+        assert!((regions[0].area() - (1200. - std::f64::consts::PI * 16.)).abs() < 0.01, "{}", regions[0].area());
+        assert!(section_outline(&mesh, &solidcraft_geom::Plane::XY.offset(50.), 0.02).is_err());
     }
 
     #[test]

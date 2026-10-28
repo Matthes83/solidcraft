@@ -489,6 +489,35 @@ fn sealed(r: &Region2) -> Region2 {
     Region2 { outer: seal(&r.outer), holes: r.holes.iter().map(seal).collect() }
 }
 
+/// The section of a closed mesh by `plane`, in its coordinates, fitted as lines, arcs and
+/// circles within `tolerance` (no facets): outer loops counter-clockwise seen along the
+/// plane's normal, holes clockwise. Empty when the plane misses the mesh.
+pub(crate) fn section_outline(mesh: &TriMesh, plane: &Plane, tolerance: f64) -> Result<Vec<Region2>> {
+    let bounds = mesh.positions.iter().fold(solidcraft_geom::Aabb3::EMPTY, |mut b, p| {
+        b.add(*p);
+        b
+    });
+    let size = bounds.size().len().max(1.);
+    let epsilon = (size * 1e-7).min(tolerance * 0.01).max(1e-9);
+    let snap = (tolerance * 0.1).max(epsilon * 3.);
+    let tris = triangles(mesh)?;
+    let d = plane.normal();
+    let ranges: Vec<(f64, f64)> = tris
+        .iter()
+        .map(|t| {
+            let h = heights(mesh, t, d);
+            (h[0].min(h[1]).min(h[2]), h[0].max(h[1]).max(h[2]))
+        })
+        .collect();
+    let h = plane.origin.dot(d);
+    let regions = section(mesh, &tris, &ranges, plane, d, h, epsilon, snap * 0.2)?;
+    if regions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut shared = Shared::default();
+    fit_regions(&regions, tolerance, snap, epsilon, size, &mut shared)
+}
+
 /// A region thinner than the tolerance on average: a fitting sliver, not a pocket.
 fn is_sliver(r: &Region2, tolerance: f64) -> bool {
     let perimeter: f64 = std::iter::once(&r.outer).chain(&r.holes).flat_map(|l| &l.segs).map(Seg2::length).sum();
