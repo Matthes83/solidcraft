@@ -7866,7 +7866,7 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             *target = result;
             Ok(())
         }
-        FeatureKind::MeshFit { body, tolerance, picks, all_surfaces } => {
+        FeatureKind::MeshFit { body, tolerance, picks, all_surfaces, surfaces } => {
             let tolerance = val(vals, tolerance, Kind::Length)?;
             let source = st.body(body).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
             if doc.model_body_component(source) != f.component {
@@ -7882,7 +7882,7 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             if *all_surfaces {
                 picked.extend(kernel::picks_for_all(&source.body, tolerance)?);
             }
-            let made = kernel::fit_bodies(&source.body, tolerance, &picked)?;
+            let made = kernel::fit_bodies(&source.body, tolerance, &picked, *surfaces)?;
             for (k, (name, b)) in made.into_iter().enumerate() {
                 let name = copy_body_name(st, f, k, &name);
                 st.bodies.push(ModelBody::new(name, b, f.id));

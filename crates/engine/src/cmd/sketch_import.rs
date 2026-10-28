@@ -179,7 +179,7 @@ fn drawing_bounds(_s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"min": [lo.x, lo.y], "max": [hi.x, hi.y], "width": hi.x - lo.x, "height": hi.y - lo.y}))
 }
 
-fn insert(s: &mut Session, p: &Value, cmd: &str, svg: bool) -> Result<Value> {
+pub(super) fn insert(s: &mut Session, p: &Value, cmd: &str, svg: bool) -> Result<Value> {
     let geom = read_drawing(p, cmd, svg)?;
     if geom.is_empty() {
         return Err(bad(cmd, "the drawing has no geometry SolidCraft reads"));

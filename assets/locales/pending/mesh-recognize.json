@@ -12,7 +12,9 @@
     "Auto": "Auto",
     "cmd.mesh_fit_bodies": "Bodies from Surfaces",
     "Solid from mesh": "Solid from mesh",
-    "Bodies from surfaces": "Bodies from surfaces"
+    "Bodies from surfaces": "Bodies from surfaces",
+    "Sketches": "Sketches",
+    "cmd.mesh_sketch_outline": "Sketch from Surface"
   },
   "de": {
     "cmd.mesh_recognize": "Fläche erkennen",
@@ -27,7 +29,9 @@
     "Auto": "Auto",
     "cmd.mesh_fit_bodies": "Körper aus Flächen",
     "Solid from mesh": "Volumenkörper aus Netz",
-    "Bodies from surfaces": "Körper aus Flächen"
+    "Bodies from surfaces": "Körper aus Flächen",
+    "Sketches": "Skizzen",
+    "cmd.mesh_sketch_outline": "Skizze aus Fläche"
   },
   "ar": {
     "cmd.mesh_recognize": "التعرف على السطح",
@@ -42,7 +46,9 @@
     "Auto": "تلقائي",
     "cmd.mesh_fit_bodies": "أجسام من الأسطح",
     "Solid from mesh": "جسم صلب من الشبكة",
-    "Bodies from surfaces": "أجسام من الأسطح"
+    "Bodies from surfaces": "أجسام من الأسطح",
+    "Sketches": "رسومات",
+    "cmd.mesh_sketch_outline": "رسم من السطح"
   },
   "he": {
     "cmd.mesh_recognize": "זיהוי משטח",
@@ -57,7 +63,9 @@
     "Auto": "אוטומטי",
     "cmd.mesh_fit_bodies": "גופים ממשטחים",
     "Solid from mesh": "גוף מוצק מהרשת",
-    "Bodies from surfaces": "גופים ממשטחים"
+    "Bodies from surfaces": "גופים ממשטחים",
+    "Sketches": "סקיצות",
+    "cmd.mesh_sketch_outline": "סקיצה ממשטח"
   },
   "ja": {
     "cmd.mesh_recognize": "サーフェスを認識",
@@ -72,7 +80,9 @@
     "Auto": "自動",
     "cmd.mesh_fit_bodies": "サーフェスからボディ",
     "Solid from mesh": "メッシュからソリッド",
-    "Bodies from surfaces": "サーフェスからボディ"
+    "Bodies from surfaces": "サーフェスからボディ",
+    "Sketches": "スケッチ",
+    "cmd.mesh_sketch_outline": "サーフェスからスケッチ"
   },
   "vi": {
     "cmd.mesh_recognize": "Nhận dạng bề mặt",
@@ -87,7 +97,9 @@
     "Auto": "Tự động",
     "cmd.mesh_fit_bodies": "Khối từ bề mặt",
     "Solid from mesh": "Khối đặc từ lưới",
-    "Bodies from surfaces": "Khối từ bề mặt"
+    "Bodies from surfaces": "Khối từ bề mặt",
+    "Sketches": "Bản phác thảo",
+    "cmd.mesh_sketch_outline": "Phác thảo từ bề mặt"
   },
   "zh": {
     "cmd.mesh_recognize": "识别曲面",
@@ -102,6 +114,8 @@
     "Auto": "自动",
     "cmd.mesh_fit_bodies": "由曲面生成实体",
     "Solid from mesh": "由网格生成实体",
-    "Bodies from surfaces": "由曲面生成实体"
+    "Bodies from surfaces": "由曲面生成实体",
+    "Sketches": "草图",
+    "cmd.mesh_sketch_outline": "由曲面生成草图"
   }
 }

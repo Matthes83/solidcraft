@@ -1012,7 +1012,7 @@ pub(crate) fn snap_to_picks(
 ///
 /// Each surface is regularised as for [`crate::convert_mesh_with_regions`] (directions within
 /// half a degree made exact), so blocks and bores meet square. The mesh is not changed.
-pub fn fit_bodies(body: &Body, tolerance: f64, picks: &[(Vec3, SurfaceKind)]) -> Result<Vec<(String, Body)>> {
+pub fn fit_bodies(body: &Body, tolerance: f64, picks: &[(Vec3, SurfaceKind)], surfaces: bool) -> Result<Vec<(String, Body)>> {
     crate::guard("fit bodies to mesh surfaces", || {
         checked_tolerance(tolerance)?;
         if picks.is_empty() || picks.len() > 10_000 || picks.iter().any(|(p, _)| !p.is_finite()) {
@@ -1020,22 +1020,7 @@ pub fn fit_bodies(body: &Body, tolerance: f64, picks: &[(Vec3, SurfaceKind)]) ->
         }
         let ctx = context(body, tolerance)?;
         let n = ctx.triangles.len();
-        let mut claimed = vec![false; n];
-        let mut regions: Vec<MeshRegion> = Vec::new();
-        for (i, (point, kind)) in picks.iter().enumerate() {
-            let seed = ctx.nearest(*point).ok_or_else(|| invalid("empty mesh"))?;
-            if claimed.get(seed as usize).copied().unwrap_or(true) {
-                continue;
-            }
-            let region = grow(&ctx, seed, *kind, tolerance, &claimed)
-                .ok_or_else(|| invalid(&format!("pick {}: no surface of that kind fits the mesh there within {tolerance} mm", i + 1)))?;
-            for t in &region.triangles {
-                if let Some(c) = claimed.get_mut(*t as usize) {
-                    *c = true;
-                }
-            }
-            regions.push(region);
-        }
+        let mut regions = picked_regions(&ctx, picks, tolerance)?;
         regularize(&mut regions, tolerance);
         let all = vertices(&ctx, &(0..n).filter_map(|t| u32::try_from(t).ok()).collect::<Vec<_>>());
         let mut bounds = solidcraft_geom::Aabb3::EMPTY;
@@ -1045,6 +1030,12 @@ pub fn fit_bodies(body: &Body, tolerance: f64, picks: &[(Vec3, SurfaceKind)]) ->
         let size = bounds.size().len().max(1.);
         let margin = size * 0.02;
         let mut out = Vec::new();
+        if surfaces {
+            for region in &regions {
+                out.push(surface_sheet(&ctx, region, tolerance)?);
+            }
+            return Ok(out);
+        }
         for region in &regions {
             let own = vertices(&ctx, &region.triangles);
             let (name, solid) = match region.surface {
@@ -1091,6 +1082,181 @@ pub fn fit_bodies(body: &Body, tolerance: f64, picks: &[(Vec3, SurfaceKind)]) ->
             out.push((name, solid));
         }
         Ok(out)
+    })
+}
+
+/// The regions of `picks`, each over triangles no earlier pick took (a second pick on a region
+/// already found adds nothing).
+fn picked_regions(ctx: &Ctx, picks: &[(Vec3, SurfaceKind)], tolerance: f64) -> Result<Vec<MeshRegion>> {
+    let mut claimed = vec![false; ctx.triangles.len()];
+    let mut regions: Vec<MeshRegion> = Vec::new();
+    for (i, (point, kind)) in picks.iter().enumerate() {
+        let seed = ctx.nearest(*point).ok_or_else(|| invalid("empty mesh"))?;
+        if claimed.get(seed as usize).copied().unwrap_or(true) {
+            continue;
+        }
+        let region = grow(ctx, seed, *kind, tolerance, &claimed)
+            .ok_or_else(|| invalid(&format!("pick {}: no surface of that kind fits the mesh there within {tolerance} mm", i + 1)))?;
+        for t in &region.triangles {
+            if let Some(c) = claimed.get_mut(*t as usize) {
+                *c = true;
+            }
+        }
+        regions.push(region);
+    }
+    Ok(regions)
+}
+
+/// The boundary of a planar region in `plane`'s coordinates, fitted as lines, arcs and circles
+/// (no facets): outer loops counter-clockwise seen along the normal, holes clockwise.
+fn planar_outline(ctx: &Ctx, region: &MeshRegion, plane: &solidcraft_geom::Plane, tolerance: f64) -> Result<Vec<solidcraft_geom::Region2>> {
+    use solidcraft_geom::{Loop2, Region2};
+    let inside: std::collections::BTreeSet<(u32, u32)> = region
+        .triangles
+        .iter()
+        .flat_map(|t| {
+            let [a, b, c] = ctx.triangles.get(*t as usize).copied().unwrap_or([0, 0, 0]);
+            [(a, b), (b, c), (c, a)]
+        })
+        .collect();
+    let mut next = std::collections::BTreeMap::<u32, u32>::new();
+    for &(a, b) in &inside {
+        if !inside.contains(&(b, a)) {
+            next.insert(a, b);
+        }
+    }
+    let fit = (tolerance * 0.1).max(1e-9);
+    let mut loops: Vec<Loop2> = Vec::new();
+    while let Some((&start, _)) = next.first_key_value() {
+        let mut points = Vec::new();
+        let mut current = start;
+        for _ in 0..=ctx.positions.len() {
+            let Some(to) = next.remove(&current) else { break };
+            points.push(plane.to_local(ctx.positions.get(current as usize).copied().unwrap_or(Vec3::ZERO)));
+            current = to;
+            if current == start {
+                break;
+            }
+        }
+        let points = crate::mesh_convert_milled::drop_collinear(&points, fit * 0.5);
+        if points.len() >= 3 {
+            loops.push(crate::mesh_convert_milled::fit_profile(&points, tolerance, fit));
+        }
+    }
+    let mut regions: Vec<Region2> = loops.iter().filter(|l| l.signed_area() > 0.).map(|l| Region2 { outer: l.clone(), holes: Vec::new() }).collect();
+    for hole in loops.iter().filter(|l| l.signed_area() < 0.) {
+        let Some(probe) = hole.segs.first().map(solidcraft_geom::Seg2::start) else { continue };
+        let owner = regions.iter_mut().filter(|r| r.outer.contains(probe)).min_by(|a, b| a.outer.signed_area().total_cmp(&b.outer.signed_area()));
+        if let Some(r) = owner {
+            r.holes.push(hole.clone());
+        }
+    }
+    if regions.is_empty() {
+        return Err(invalid("the picked plane has no closed outline"));
+    }
+    Ok(regions)
+}
+
+/// A cylinder or cone region's axial range from its point or apex and its angular range
+/// around the axis: (along from, along to, start angle, sweep), the sweep a whole turn when
+/// the region goes all round. Angles are in the frame `u`, `v` across the axis.
+fn around(points: &[Vec3], origin: Vec3, axis: Vec3, u: Vec3, v: Vec3) -> (f64, f64, f64, f64) {
+    let (mut a, mut b) = (f64::INFINITY, f64::NEG_INFINITY);
+    let mut angles: Vec<f64> = Vec::with_capacity(points.len());
+    for p in points {
+        let w = *p - origin;
+        let h = w.dot(axis);
+        a = a.min(h);
+        b = b.max(h);
+        angles.push(w.dot(v).atan2(w.dot(u)));
+    }
+    angles.sort_by(f64::total_cmp);
+    let tau = std::f64::consts::TAU;
+    let mut gap = (0f64, 0f64);
+    for (i, x) in angles.iter().enumerate() {
+        let y = angles.get(i + 1).copied().unwrap_or(angles.first().copied().unwrap_or(0.) + tau);
+        if y - x > gap.1 - gap.0 {
+            gap = (*x, y);
+        }
+    }
+    if gap.1 - gap.0 < 30f64.to_radians() { (a, b, 0., tau) } else { (a, b, gap.1, tau - (gap.1 - gap.0)) }
+}
+
+/// A sheet on a picked surface, bounded as its region is: a plane's face inside its fitted
+/// outline, a cylinder's wall over its length and the angle it covers. Cones and spheres have
+/// no sheet yet.
+fn surface_sheet(ctx: &Ctx, region: &MeshRegion, tolerance: f64) -> Result<(String, Body)> {
+    use solidcraft_geom::{Seg2, Vec2};
+    let own = vertices(ctx, &region.triangles);
+    match region.surface {
+        Primitive::Plane { point, normal } => {
+            let plane = solidcraft_geom::Plane::from_normal(point, normal).ok_or_else(|| invalid("degenerate plane"))?;
+            let outline = planar_outline(ctx, region, &plane, tolerance)?;
+            let mut sheets = outline.iter().map(|r| crate::patch_region(&plane, r)).collect::<Result<Vec<_>>>()?;
+            let first = sheets.pop().ok_or_else(|| invalid("the picked plane has no closed outline"))?;
+            let sheet = sheets.into_iter().try_fold(first, |acc, s| crate::union_apart(&[acc.clone(), s]).map(|u| u.unwrap_or(acc)))?;
+            Ok(("Plane surface".to_string(), sheet))
+        }
+        Primitive::Cylinder { point, axis, radius } => {
+            let u = axis.any_perp().normalized().ok_or_else(|| invalid("degenerate axis"))?;
+            let v = axis.cross(u);
+            let (a, b, start, sweep) = around(&own, point, axis, u, v);
+            if !(b > a) {
+                return Err(invalid("a picked cylinder has no length"));
+            }
+            let plane = solidcraft_geom::Plane::new(point + axis * a, u, v).ok_or_else(|| invalid("degenerate axis"))?;
+            let chain: Vec<Seg2> = if sweep >= std::f64::consts::TAU {
+                solidcraft_geom::Loop2::circle(Vec2::new(0., 0.), radius).segs
+            } else {
+                vec![Seg2::Arc { center: Vec2::new(0., 0.), radius, start, sweep }]
+            };
+            Ok((format!("Cylinder surface Ø{:.3}", 2. * radius), crate::extrude_sheet(&plane, &[chain], 0., b - a)?))
+        }
+        Primitive::Cone { .. } => Err(invalid("cone surfaces are not supported yet; make the cone a body instead")),
+        Primitive::Sphere { .. } => Err(invalid("sphere surfaces are not supported yet; make the sphere a body instead")),
+    }
+}
+
+/// A sketch's worth of the picked surface, without the mesh's facets: a plane's outline (lines,
+/// arcs and circles) in that plane, or a cylinder's or cone's circle in the plane across its
+/// axis at the end of its region nearer the axis origin. The plane's frame comes with it; its
+/// `x`, `y` are the sketch's axes.
+pub fn surface_outline(
+    body: &Body,
+    point: Vec3,
+    kind: SurfaceKind,
+    tolerance: f64,
+) -> Result<(solidcraft_geom::Plane, Vec<solidcraft_geom::Region2>)> {
+    use solidcraft_geom::{Loop2, Region2, Vec2};
+    crate::guard("outline a mesh surface", || {
+        checked_tolerance(tolerance)?;
+        if !point.is_finite() {
+            return Err(invalid("the point must be finite"));
+        }
+        let ctx = context(body, tolerance)?;
+        let mut regions = picked_regions(&ctx, &[(point, kind)], tolerance)?;
+        regularize(&mut regions, tolerance);
+        let region = regions.first().ok_or_else(|| invalid("nothing recognised there"))?;
+        let own = vertices(&ctx, &region.triangles);
+        match region.surface {
+            Primitive::Plane { point, normal } => {
+                let plane = solidcraft_geom::Plane::from_normal(point, normal).ok_or_else(|| invalid("degenerate plane"))?;
+                let outline = planar_outline(&ctx, region, &plane, tolerance)?;
+                Ok((plane, outline))
+            }
+            Primitive::Cylinder { point, axis, radius } => {
+                let (a, ..) = around(&own, point, axis, Vec3::X, Vec3::Y);
+                let plane = solidcraft_geom::Plane::from_normal(point + axis * a, axis).ok_or_else(|| invalid("degenerate axis"))?;
+                Ok((plane, vec![Region2 { outer: Loop2::circle(Vec2::new(0., 0.), radius), holes: Vec::new() }]))
+            }
+            Primitive::Cone { apex, axis, half_angle } => {
+                let (a, b, ..) = around(&own, apex, axis, Vec3::X, Vec3::Y);
+                let at = if a > 1e-9 { a } else { b };
+                let plane = solidcraft_geom::Plane::from_normal(apex + axis * at, axis).ok_or_else(|| invalid("degenerate axis"))?;
+                Ok((plane, vec![Region2 { outer: Loop2::circle(Vec2::new(0., 0.), at * half_angle.tan()), holes: Vec::new() }]))
+            }
+            Primitive::Sphere { .. } => Err(invalid("a sphere has no outline to sketch")),
+        }
     })
 }
 
@@ -1338,7 +1504,7 @@ mod tests {
             (Vec3::new(13.5, 15., 7.4), SurfaceKind::Auto),
             (Vec3::new(28., 2.5, 10.5), SurfaceKind::Auto),
         ];
-        let bodies = fit_bodies(&mesh, 0.02, &picks).unwrap();
+        let bodies = fit_bodies(&mesh, 0.02, &picks, false).unwrap();
         let names: Vec<&str> = bodies.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["Plane", "Cylinder Ø8.000", "Cone 118.0°", "Sphere R5.000"], "{names:?}");
         // The top face's block lies under z = 20 across the whole part.
@@ -1350,7 +1516,28 @@ mod tests {
         // Cutting the bore and the drill point from the top block leaves the part's hole.
         let cut = crate::boolean(&bodies[0].1, &bodies[1].1, BoolOp::Cut).unwrap().unwrap();
         assert!(crate::measure(&cut).unwrap().volume < crate::measure(&bodies[0].1).unwrap().volume);
-        assert!(fit_bodies(&mesh, 0.02, &[]).is_err());
+        assert!(fit_bodies(&mesh, 0.02, &[], false).is_err());
+        // As surfaces: the top face inside its outline (with the bore's hole), the bore's wall.
+        let sheets = fit_bodies(&mesh, 0.02, &picks[..2], true).unwrap();
+        assert_eq!(sheets[0].0, "Plane surface");
+        let area = crate::measure(&sheets[0].1).unwrap().area;
+        assert!((area - (1200. - std::f64::consts::PI * 16.)).abs() < 0.5, "{area}");
+        let wall = crate::measure(&sheets[1].1).unwrap().area;
+        assert!((wall - std::f64::consts::TAU * 4. * 12.).abs() < 0.5, "{wall}");
+        assert_eq!(crate::measure(&sheets[1].1).unwrap().merged.face_types.get("cylinder"), Some(&1));
+        // The top face's outline as a sketch: the rectangle and the bore's circle, no facets.
+        let (plane, outline) = surface_outline(&mesh, Vec3::new(30., 25., 20.), SurfaceKind::Auto, 0.02).unwrap();
+        assert!((plane.normal().z - 1.).abs() < 1e-9);
+        assert_eq!(outline.len(), 1);
+        assert_eq!(outline[0].outer.segs.len(), 4, "{:?}", outline[0].outer.segs);
+        assert_eq!(outline[0].holes.len(), 1);
+        assert!(
+            outline[0].holes[0].segs.iter().all(|s| matches!(s, solidcraft_geom::Seg2::Arc { radius, .. } if (radius - 4.).abs() < 1e-3)),
+            "{:?}",
+            outline[0].holes[0].segs
+        );
+        let (_, circle) = surface_outline(&mesh, Vec3::new(16., 15., 14.), SurfaceKind::Auto, 0.02).unwrap();
+        assert!((circle[0].area() - std::f64::consts::PI * 16.).abs() < 1e-3);
     }
 
     #[test]

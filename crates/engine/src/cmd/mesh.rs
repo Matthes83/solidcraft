@@ -10,7 +10,7 @@ use super::{
     features::{add_feature, check_expr},
 };
 use crate::schema::features::FeatureResult;
-use crate::schema::mesh::{MeshFitParams, MeshRecognizeParams, MeshRecognizeResult, MeshRegionReply};
+use crate::schema::mesh::{MeshFitParams, MeshRecognizeParams, MeshRecognizeResult, MeshRegionReply, MeshSketchParams, MeshSketchResult};
 use crate::schema::{TypedContract, output_schema_for};
 use crate::{
     Result, Sel, Session,
@@ -19,6 +19,7 @@ use crate::{
 
 const RECOGNIZE_CONTRACT: TypedContract<MeshRecognizeParams> = TypedContract::new();
 const FIT_CONTRACT: TypedContract<MeshFitParams> = TypedContract::new();
+const SKETCH_CONTRACT: TypedContract<MeshSketchParams> = TypedContract::new();
 
 pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("mesh.convert", "Convert Mesh", convert)
@@ -29,6 +30,11 @@ pub static COMMANDS: &[CommandSpec] = &[
         .contract(&FIT_CONTRACT)
         .output(output_schema_for::<FeatureResult>)
         .params("body?: mesh body name (default: the selected mesh body); tolerance?: length expression (default 0.05 mm); picks?: [{point: [x,y,z] on the mesh (body coordinates), kind?: auto|plane|cylinder|cone|sphere}]; all_surfaces?: bool: one solid per picked surface, to build the part from by hand: a plane's material side as a block over the whole mesh, a cylinder or cone over its region's length (a little longer, so a bore's solid cuts through), a sphere whole; the mesh body stays; name?"),
+    CommandSpec::new("mesh.sketch_outline", "Sketch from Surface", crate::checked!("mesh.sketch_outline", sketch_outline))
+        .icon("sketch")
+        .contract(&SKETCH_CONTRACT)
+        .output(output_schema_for::<MeshSketchResult>)
+        .params("body?: mesh body name (default: the selected mesh body); point: [x,y,z] on the surface (body coordinates); kind?: auto|plane|cylinder|cone; tolerance?: length expression (default 0.05 mm); name?: a new sketch with the surface's outline and no facets: a plane's boundary as lines, arcs and circles in that plane, a cylinder's or cone's circle in the plane across its axis"),
     CommandSpec::new("mesh.recognize", "Recognize Surface", crate::checked!("mesh.recognize", recognize))
         .icon("inspect")
         .noundo()
@@ -144,6 +150,7 @@ fn fit_bodies(s: &mut Session, p: &Value) -> Result<Value> {
     check_expr(s, &tolerance, Kind::Length, cmd, "tolerance")?;
     let picks = picks(p, cmd)?;
     let all_surfaces = bool_(p, "all_surfaces").unwrap_or(false);
+    let surfaces = bool_(p, "surfaces").unwrap_or(false);
     if picks.is_empty() && !all_surfaces {
         return Err(bad(cmd, "pick at least one surface on the mesh (or set all_surfaces: true)"));
     }
@@ -155,8 +162,81 @@ fn fit_bodies(s: &mut Session, p: &Value) -> Result<Value> {
     // The solids belong with the mesh, in its component's own frame.
     let active_component = std::mem::replace(&mut s.active_component, owner);
     let active_occurrence_path = s.active_occurrence_path.take();
-    let result = add_feature(s, p, FeatureKind::MeshFit { body: body.into(), tolerance, picks, all_surfaces });
+    let result = add_feature(s, p, FeatureKind::MeshFit { body: body.into(), tolerance, picks, all_surfaces, surfaces });
     s.active_component = active_component;
     s.active_occurrence_path = active_occurrence_path;
     result
+}
+
+fn sketch_outline(s: &mut Session, p: &Value) -> Result<Value> {
+    use solidcraft_geom::Seg2;
+    use solidcraft_io::Geom2;
+    let cmd = "mesh.sketch_outline";
+    let state = s.model.state();
+    let body = target(s, p, cmd)?;
+    let source = state.body(&body).ok_or_else(|| bad(cmd, format!("no body `{body}`")))?;
+    if !source.body.is_mesh() {
+        return Err(bad(cmd, "select a mesh body"));
+    }
+    if s.active_sketch.is_some() {
+        return Err(bad(cmd, "finish the sketch being edited first"));
+    }
+    let tolerance = expr(p, "tolerance").unwrap_or_else(|| "0.05 mm".into());
+    let tolerance = s.doc.eval(&tolerance, Kind::Length).map_err(|e| bad(cmd, format!("tolerance: {e}")))?;
+    let point = p.get("point").and_then(vec3).ok_or_else(|| bad(cmd, "`point` must be [x, y, z] on the mesh"))?;
+    let (plane, regions) = solidcraft_kernel::surface_outline(&source.body, point, kind(p, cmd)?, tolerance).map_err(|e| bad(cmd, e.to_string()))?;
+    let mut geom = Vec::new();
+    for lp in regions.iter().flat_map(|r| std::iter::once(&r.outer).chain(&r.holes)) {
+        // A loop of arcs of one circle all round is that circle.
+        let circle = match lp.segs.first() {
+            Some(Seg2::Arc { center, radius, .. })
+                if lp
+                    .segs
+                    .iter()
+                    .all(|x| matches!(x, Seg2::Arc { center: c, radius: r, .. } if c.dist(*center) < 1e-9 && (r - radius).abs() < 1e-9))
+                    && (lp
+                        .segs
+                        .iter()
+                        .map(|x| match x {
+                            Seg2::Arc { sweep, .. } => sweep.abs(),
+                            _ => 0.,
+                        })
+                        .sum::<f64>()
+                        - std::f64::consts::TAU)
+                        .abs()
+                        < 1e-6 =>
+            {
+                Some(Geom2::Circle(*center, *radius))
+            }
+            _ => None,
+        };
+        if let Some(c) = circle {
+            geom.push(c);
+            continue;
+        }
+        for seg in &lp.segs {
+            match *seg {
+                Seg2::Line { a, b } => geom.push(Geom2::Line(a, b)),
+                Seg2::Arc { center, sweep, .. } => {
+                    let (a, b) = if sweep > 0. { (seg.start(), seg.end()) } else { (seg.end(), seg.start()) };
+                    geom.push(Geom2::Arc { c: center, a, b });
+                }
+                _ => {}
+            }
+        }
+    }
+    let o = plane.origin;
+    let mut params = serde_json::json!({
+        "text": solidcraft_io::write_dxf(&geom),
+        "plane": {"origin": [o.x, o.y, o.z], "x_dir": [plane.x.x, plane.x.y, plane.x.z], "y_dir": [plane.y.x, plane.y.y, plane.y.z]},
+        "tolerance": (tolerance * 0.01).clamp(1e-9, 0.01),
+    });
+    if let Some(n) = str_(p, "name") {
+        params["name"] = serde_json::json!(n);
+    }
+    let made = super::sketch_import::insert(s, &params, cmd, false)?;
+    let sketch = made.get("sketch").and_then(Value::as_u64).or(s.active_sketch).unwrap_or(0);
+    let curves = made.get("curves").and_then(Value::as_u64).unwrap_or(0) as usize;
+    (super::find_command("sketch.finish").ok_or_else(|| bad(cmd, "sketch.finish"))?.run)(s, &serde_json::json!({}))?;
+    serde_json::to_value(MeshSketchResult { sketch, curves, param_warnings: Vec::new() }).map_err(|e| bad(cmd, e.to_string()))
 }

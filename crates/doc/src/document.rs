@@ -1775,6 +1775,9 @@ pub enum FeatureKind {
         /// A solid for every surface of the mesh, as if each had been picked.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         all_surfaces: bool,
+        /// Sheets on the surfaces, bounded as their regions are, instead of solids.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        surfaces: bool,
     },
     /// Mesh bodies imported from a 3MF or STL file, embedded in the design.
     MeshImport {

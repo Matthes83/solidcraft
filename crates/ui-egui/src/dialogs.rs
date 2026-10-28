@@ -227,8 +227,9 @@ crate::dialog_descriptor::dialog_descriptors! {
                 tolerance: String,
                 kinds: Vec<usize>,
                 found: Vec<(Vec3, usize, String)>,
-                /// Make one solid per clicked surface instead of converting the mesh.
-                separate: bool,
+                /// What OK makes: the converted mesh (0), a solid per clicked surface (1), a
+                /// sheet per clicked surface (2) or a sketch of each clicked surface's outline (3).
+                result: usize,
             },
             /// A construction axis, point or plane made from picks alone (#2474): input `i` is the
             /// command's parameter `keys[i]`, and `t` (along a path) when it takes one.
@@ -854,7 +855,7 @@ impl Dialog {
                 vec![SelInput::new("Objects", BODIES, true), SelInput::new("Path", CURVES, true)],
             ),
             "mesh.convert" => Dialog::new(
-                Kind::MeshConvert { tolerance: crate::length_input::model(&s.doc, 0.05), kinds: Vec::new(), found: Vec::new(), separate: false },
+                Kind::MeshConvert { tolerance: crate::length_input::model(&s.doc, 0.05), kinds: Vec::new(), found: Vec::new(), result: 0 },
                 vec![SelInput::new("Mesh body", BODIES, false), SelInput::new("Surfaces", FACES, true)],
             ),
             "construct.plane.midplane" => Dialog::new(
@@ -4143,7 +4144,7 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
                 None => ("construct.plane.offset", json!({"base": base})),
             }
         }
-        Kind::MeshConvert { tolerance, kinds, separate, .. } => {
+        Kind::MeshConvert { tolerance, kinds, result, .. } => {
             // The mesh body, or the one its surfaces were clicked on.
             let body = match sels(d, 0).first() {
                 Some(Sel::Body { name }) => Some(name.clone()),
@@ -4164,11 +4165,26 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
                     _ => None,
                 })
                 .collect();
-            if *separate {
+            if *result == 3 {
+                if picks.is_empty() {
+                    return Err("click the surfaces to sketch".into());
+                }
+                // A sketch per clicked surface.
+                return Ok(picks
+                    .into_iter()
+                    .map(|pick| {
+                        let mut p = pick;
+                        p["body"] = json!(body);
+                        p["tolerance"] = json!(tolerance);
+                        ("mesh.sketch_outline".to_string(), p)
+                    })
+                    .collect());
+            }
+            if *result == 1 || *result == 2 {
                 if picks.is_empty() && !d.extra.get("all_surfaces").and_then(Value::as_bool).unwrap_or(false) {
                     return Err("click the surfaces to make bodies from".into());
                 }
-                ("mesh.fit_bodies", json!({"body": body, "tolerance": tolerance, "picks": picks}))
+                ("mesh.fit_bodies", json!({"body": body, "tolerance": tolerance, "picks": picks, "surfaces": *result == 2}))
             } else if picks.is_empty() {
                 ("mesh.convert", json!({"body": body, "tolerance": tolerance}))
             } else {

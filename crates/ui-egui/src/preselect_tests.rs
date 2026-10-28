@@ -2608,8 +2608,8 @@ fn convert_mesh_can_make_a_body_per_clicked_surface() {
     h.app.start("mesh.convert");
     h.frames(1);
     let d = h.app.dialog.as_mut().unwrap();
-    if let Kind::MeshConvert { separate, .. } = &mut d.kind {
-        *separate = true;
+    if let Kind::MeshConvert { result, .. } = &mut d.kind {
+        *result = 1;
     }
     d.active = 1;
     d.pick(&h.app.session, Sel::Face { body: "Mesh".into(), index: 0, point: Vec3::new(5., 10., 30.) });
@@ -2621,6 +2621,22 @@ fn convert_mesh_can_make_a_body_per_clicked_surface() {
     assert!(state.body("Mesh").unwrap().body.is_mesh(), "the mesh stays");
     let planes = state.bodies.iter().filter(|b| b.name.starts_with("Plane")).count();
     assert_eq!(planes, 2, "{:?}", state.bodies.iter().map(|b| &b.name).collect::<Vec<_>>());
+    // Sketches: the clicked face's outline, four lines and no facets.
+    h.app.session.selection = vec![Sel::Body { name: "Mesh".into() }];
+    h.app.start("mesh.convert");
+    h.frames(1);
+    let d = h.app.dialog.as_mut().unwrap();
+    if let Kind::MeshConvert { result, .. } = &mut d.kind {
+        *result = 3;
+    }
+    d.active = 1;
+    d.pick(&h.app.session, Sel::Face { body: "Mesh".into(), index: 0, point: Vec3::new(5., 10., 30.) });
+    h.frames(2);
+    h.step(&json!({"key":"Enter"})).unwrap();
+    assert!(h.app.dialog.is_none(), "{:?}", h.app.dialog.as_ref().and_then(|d| d.error.clone()));
+    let state = h.app.session.model.state();
+    let sketch = state.sketches.iter().last().map(|s| s.sketch.curves.len());
+    assert_eq!(sketch, Some(4));
 }
 
 /// #3001: Convert Mesh opens a dialog instead of failing with "select a mesh body". With the

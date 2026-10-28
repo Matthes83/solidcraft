@@ -843,7 +843,7 @@ fn close_gaps(segs: Vec<Seg2>) -> Vec<Seg2> {
 
 /// The polyline without points lying on the straight line between their neighbours (the
 /// section of a faceted wall crosses each facet's diagonal mid-chord).
-fn drop_collinear(points: &[Vec2], within: f64) -> Vec<Vec2> {
+pub(crate) fn drop_collinear(points: &[Vec2], within: f64) -> Vec<Vec2> {
     let mut out: Vec<Vec2> = points.to_vec();
     if out.len() > MAX_FIT_POINTS * 4 {
         return out;

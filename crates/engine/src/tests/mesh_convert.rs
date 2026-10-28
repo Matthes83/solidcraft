@@ -207,6 +207,15 @@ fn picked_surfaces_are_recognised_and_complete_the_solid() {
         "{names:?} {made}"
     );
     assert!(s.execute("mesh.fit_bodies", &json!({"body":name})).is_err());
+    // As surfaces, and the top face's outline as a sketch: rectangle and bore circle, no facets.
+    run(&mut s, "mesh.fit_bodies", json!({"body":name,"surfaces":true,"picks":[{"point":[30,25,20]},{"point":[16,15,14]}]}));
+    assert!(s.model.state().bodies.iter().any(|b| b.name.starts_with("Plane surface")));
+    let sk = run(&mut s, "mesh.sketch_outline", json!({"body":name,"point":[30,25,20]}));
+    assert_eq!(sk["curves"], 5, "{sk}");
+    let id = sk["sketch"].as_u64().unwrap();
+    let profiles = s.model.state().sketch(id).unwrap().profiles.clone();
+    let area: f64 = profiles.iter().map(|p| p.area).fold(0., f64::max);
+    assert!((area - (1200. - std::f64::consts::PI * 16.)).abs() < 0.5 || (area - 1200.).abs() < 0.5, "{area}");
     assert!(s.execute("mesh.convert", &json!({"body":name})).is_err());
     run(&mut s, "mesh.convert", json!({"body":name,"picks":[{"point":[13.5,15,7.2],"kind":"cone"}]}));
     let state = s.model.state();

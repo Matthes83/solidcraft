@@ -96,8 +96,48 @@ pub struct MeshFitParams {
     /// A solid for every surface of the mesh. Default: false.
     #[serde(default)]
     pub all_surfaces: Option<bool>,
+    /// Sheets instead of solids: a plane's face inside its outline (lines, arcs and circles, no
+    /// facets), a cylinder's wall over its length and the angle it covers. Cones and spheres
+    /// have no sheet yet. Default: false.
+    #[serde(default)]
+    pub surfaces: Option<bool>,
     #[serde(flatten, deserialize_with = "feature_common")]
     pub common: FeatureCommon,
+}
+
+/// A new sketch with the outline of the surface picked on a mesh body, without the mesh's
+/// facets: a plane's boundary as lines, arcs and circles, in that plane; a cylinder's or cone's
+/// circle, in the plane across its axis at the end of its region.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct MeshSketchParams {
+    /// The mesh body. Default: the selected mesh body.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// A point on the surface, in mm in the body's coordinates.
+    pub point: Point3,
+    /// `auto`, `plane`, `cylinder` or `cone`. Default: auto.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// How far the mesh's vertices may lie from the surface, a length between 0.000001 and
+    /// 1 mm. Default: 0.05 mm.
+    #[serde(default)]
+    pub tolerance: Option<LengthExpr>,
+    /// The sketch's name.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// What `mesh.sketch_outline` returns.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MeshSketchResult {
+    /// The new sketch's feature id.
+    pub sketch: u64,
+    /// Curves drawn.
+    pub curves: usize,
+    /// In the warn parameter-check mode: what the call's parameters got wrong.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub param_warnings: Vec<String>,
 }
 
 #[cfg(test)]
