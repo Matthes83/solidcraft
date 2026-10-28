@@ -66,7 +66,12 @@ and help is welcome: see [CONTRIBUTING.md](../CONTRIBUTING.md).
   need B-rep bodies). The `mesh.convert` command reconstructs supported closed constant-section parts
   and milled parts (pockets, steps and holes along up to six machining directions, certified
   against the mesh within the tolerance) as parametric solids with planar and circular
-  cylindrical faces;
+  cylindrical faces. Reverse engineering by hand: `mesh.recognize` fits a plane, cylinder,
+  cone, sphere or torus to the region clicked on a mesh; `mesh.fit_bodies` makes a solid or a
+  sheet per recognised surface (sizes optionally rounded to a grid within the tolerance),
+  `mesh.sketch_outline` and `mesh.section_sketch` sketch a surface's outline or a section
+  without facets, `mesh.align` squares a scan onto the model axes and `mesh.deviation`
+  measures a rebuilt solid against the mesh;
   STEP import (AP203/AP214/AP242 solids, assemblies, units, names, colours) and IGES import
   (manifold solid B-reps, or trimmed and bounded surfaces sewn into solids) as a base feature
   that later features build on — open a `.step`/`.stp`/`.igs`/`.iges` file, insert one into a

@@ -38,6 +38,7 @@ pub(super) fn command(kind: &Kind) -> Option<&'static str> {
         Kind::Sweep { .. } => Some("solid.sweep"),
         Kind::Midplane => Some("construct.plane.midplane"),
         Kind::MeshConvert { .. } => Some("mesh.convert"),
+        Kind::MeshTool { tool, .. } => crate::dialogs::MESH_TOOLS.get(*tool).copied(),
         Kind::Construct { command, .. } => Some(command),
         Kind::PathPlane { .. } => Some("construct.plane.along_path"),
         Kind::Split => Some("solid.split_body"),
@@ -688,15 +689,40 @@ fn additional_rows(app: &mut SolveApp, d: &mut Dialog, ui: &mut egui::Ui) -> boo
         Kind::PathPlane { t, .. } => {
             enter |= expr_row(ui, "Position (0 to 1)", t);
         }
-        Kind::MeshConvert { tolerance, kinds, found, result } => {
+        Kind::MeshConvert { tolerance, kinds, found, result, round } => {
             form_row(ui, "Result", |ui| {
                 ui_kit::segmented(ui, result, &["Solid from mesh", "Bodies from surfaces", "Surfaces", "Sketches"], Default::default());
             });
             form_row(ui, "Tolerance", |ui| enter |= field(ui, tolerance));
+            if *result > 0 {
+                enter |= hint_row(ui, "Round to", round, tr("as measured"));
+            }
             mesh_surface_rows(app, ui, &d.inputs, &mut d.extra, tolerance, kinds, found);
         }
         Kind::Construct { t: Some(t), .. } => {
             form_row(ui, "Position (0 to 1)", |ui| enter |= field(ui, t));
+        }
+        Kind::MeshTool { tool, tolerance, plane, offset, report } => {
+            if *tool == 1 {
+                form_row(ui, "Plane", |ui| {
+                    ui_kit::segmented(ui, plane, &["XY", "XZ", "YZ"], Default::default());
+                });
+                enter |= expr_row(ui, "Offset", offset);
+            }
+            form_row(ui, "Tolerance", |ui| enter |= field(ui, tolerance));
+            match *tool {
+                0 => {
+                    ui_kit::text(
+                        ui,
+                        tr("Puts the largest flat face down on XY and the main directions along X and Y."),
+                        ui_kit::Text::Hint("mesh_tool"),
+                    );
+                }
+                1 => {
+                    ui_kit::text(ui, tr("Sketches the mesh's section as lines, arcs and circles."), ui_kit::Text::Hint("mesh_tool"));
+                }
+                _ => mesh_deviation_rows(app, ui, &d.inputs, tolerance, report),
+            }
         }
         Kind::Split | Kind::ReplaceFace | Kind::Remove | Kind::Midplane | Kind::ChatContext | Kind::Construct { t: None, .. } => {}
         Kind::Rib { thickness, depth, flip, normal, .. } => {
@@ -908,6 +934,57 @@ fn mesh_surface_rows(
 }
 
 /// What `mesh.recognize` makes of the surface at `point` on `body`, in a line.
+/// The deviation check: the mesh body against the solid, run again when either or the tolerance
+/// changes.
+fn mesh_deviation_rows(
+    app: &mut SolveApp,
+    ui: &mut egui::Ui,
+    inputs: &[crate::selection::SelInput],
+    tolerance: &str,
+    report: &mut Option<(String, Vec<String>)>,
+) {
+    let body = |i: usize| match crate::selection::items(inputs, i).first() {
+        Some(Sel::Body { name }) => Some(name.clone()),
+        _ => None,
+    };
+    let (Some(mesh), Some(solid)) = (body(0), body(1)) else {
+        ui_kit::text(ui, tr("Pick the mesh body and the solid made from it."), ui_kit::Text::Hint("mesh_tool"));
+        return;
+    };
+    let key = format!("{mesh}\u{1f}{solid}\u{1f}{tolerance}");
+    if report.as_ref().is_none_or(|(k, _)| *k != key) {
+        let params = json!({"body": mesh, "solid": solid, "tolerance": tolerance});
+        let lines = match app.session.execute("mesh.deviation", &params) {
+            Ok(r) => {
+                let num = |k: &str| r[k].as_f64().unwrap_or(f64::NAN);
+                let mut lines = vec![
+                    format!("{} {:.3} mm", tr("Largest"), num("max")),
+                    format!("{} {:.3} mm · RMS {:.3} mm", tr("Mean"), num("mean"), num("rms")),
+                    format!(
+                        "{:.1} % {} ({} {})",
+                        100. * num("within"),
+                        tr("within the tolerance"),
+                        r["vertices"].as_u64().unwrap_or(0),
+                        tr("vertices")
+                    ),
+                ];
+                for w in r["worst"].as_array().into_iter().flatten().take(3) {
+                    let p = |i: usize| w["point"][i].as_f64().unwrap_or(f64::NAN);
+                    lines.push(format!("{:+.3} mm @ ({:.2}, {:.2}, {:.2})", w["distance"].as_f64().unwrap_or(f64::NAN), p(0), p(1), p(2)));
+                }
+                lines
+            }
+            Err(e) => vec![e.to_string()],
+        };
+        *report = Some((key, lines));
+    }
+    if let Some((_, lines)) = report {
+        for line in lines.iter() {
+            ui_kit::text(ui, line, ui_kit::Text::Cell);
+        }
+    }
+}
+
 fn recognised(app: &mut SolveApp, body: &str, point: Vec3, kind: usize, tolerance: &str) -> String {
     let kind = crate::dialogs::MESH_KINDS.get(kind).copied().unwrap_or("auto");
     let params = json!({"body": body, "point": [point.x, point.y, point.z], "kind": kind, "tolerance": tolerance});
@@ -923,6 +1000,7 @@ fn recognised(app: &mut SolveApp, body: &str, point: Vec3, kind: usize, toleranc
         "cylinder" => format!("{} Ø {:.3} mm · {side}", tr("ui.cylinder"), 2. * num(&r["surface"]["radius"])),
         "cone" => format!("{} {:.2}° · {side}", tr("ui.cone"), 2. * num(&r["surface"]["half_angle"]).to_degrees()),
         "sphere" => format!("{} R {:.3} mm · {side}", tr("ui.sphere"), num(&r["surface"]["radius"])),
+        "torus" => format!("{} R {:.3} mm · r {:.3} mm · {side}", tr("ui.torus"), num(&r["surface"]["major"]), num(&r["surface"]["minor"])),
         other => other.to_string(),
     };
     let triangles = r["triangles"].as_array().map_or(0, Vec::len);

@@ -655,6 +655,12 @@ fn refine(s: Primitive, pts: &[Vec3]) -> Primitive {
     if matches!(s, Primitive::Plane { .. }) || pts.len() < 6 {
         return s;
     }
+    // A torus adjusts all eight parameters; the other surfaces the first seven, as they always
+    // have (a sphere's unused ones leave the system singular, so it keeps its linear fit).
+    if matches!(s, Primitive::Torus { .. }) { refine_n::<8>(s, pts) } else { refine_n::<7>(s, pts) }
+}
+
+fn refine_n<const N: usize>(s: Primitive, pts: &[Vec3]) -> Primitive {
     let step = pts.len().div_ceil(1500).max(1);
     let sample: Vec<Vec3> = pts.iter().step_by(step).copied().collect();
     let cost = |s: &Primitive| sample.iter().map(|p| s.signed_distance(*p).powi(2)).sum::<f64>();
@@ -662,26 +668,37 @@ fn refine(s: Primitive, pts: &[Vec3]) -> Primitive {
     let mut best_cost = cost(&s);
     let mut lambda = 1e-3;
     for _ in 0..30 {
-        let p0 = params(&best);
+        let all = params(&best);
+        let mut p0 = [0.; N];
+        for (v, a) in p0.iter_mut().zip(all) {
+            *v = a;
+        }
+        let full = |q: &[f64; N]| {
+            let mut out = all;
+            for (o, v) in out.iter_mut().zip(q) {
+                *o = *v;
+            }
+            out
+        };
         let scale = p0.iter().take(3).map(|v| v.abs()).fold(1f64, f64::max);
-        let mut jt_j = [[0.; 8]; 8];
-        let mut jt_r = [0.; 8];
-        let mut columns: Vec<Vec<f64>> = Vec::with_capacity(8);
-        for k in 0..8 {
+        let mut jt_j = [[0.; N]; N];
+        let mut jt_r = [0.; N];
+        let mut columns: Vec<Vec<f64>> = Vec::with_capacity(N);
+        for k in 0..N {
             let h = if k < 3 { 1e-7 * scale } else { 1e-7 };
             let mut q = p0;
             if let Some(v) = q.get_mut(k) {
                 *v += h;
             }
-            let col: Vec<f64> = match with_params(&best, &q) {
+            let col: Vec<f64> = match with_params(&best, &full(&q)) {
                 Some(t) => sample.iter().map(|p| (t.signed_distance(*p) - best.signed_distance(*p)) / h).collect(),
                 None => vec![0.; sample.len()],
             };
             columns.push(col);
         }
         let residual: Vec<f64> = sample.iter().map(|p| best.signed_distance(*p)).collect();
-        for i in 0..8 {
-            for j in 0..8 {
+        for i in 0..N {
+            for j in 0..N {
                 let (Some(ci), Some(cj)) = (columns.get(i), columns.get(j)) else { continue };
                 if let Some(c) = jt_j.get_mut(i).and_then(|r| r.get_mut(j)) {
                     *c = ci.iter().zip(cj).map(|(a, b)| a * b).sum();
@@ -696,8 +713,7 @@ fn refine(s: Primitive, pts: &[Vec3]) -> Primitive {
             let mut a = jt_j;
             for (i, row) in a.iter_mut().enumerate() {
                 if let Some(d) = row.get_mut(i) {
-                    // A parameter the surface doesn't use stays where it is.
-                    *d = if *d == 0. { 1. } else { *d + lambda * (*d).max(1e-12) + 1e-15 };
+                    *d += lambda * (*d).max(1e-12) + 1e-15;
                 }
             }
             let Some(delta) = solve(a, jt_r) else { break };
@@ -705,7 +721,7 @@ fn refine(s: Primitive, pts: &[Vec3]) -> Primitive {
             for (v, d) in q.iter_mut().zip(delta) {
                 *v += d;
             }
-            if let Some(t) = with_params(&best, &q) {
+            if let Some(t) = with_params(&best, &full(&q)) {
                 let c = cost(&t);
                 if c < best_cost {
                     best = t;

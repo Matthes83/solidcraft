@@ -10,7 +10,10 @@ use super::{
     features::{add_feature, check_expr},
 };
 use crate::schema::features::FeatureResult;
-use crate::schema::mesh::{MeshFitParams, MeshRecognizeParams, MeshRecognizeResult, MeshRegionReply, MeshSketchParams, MeshSketchResult};
+use crate::schema::mesh::{
+    MeshAlignParams, MeshAlignResult, MeshDeviationParams, MeshDeviationPoint, MeshDeviationResult, MeshFitParams, MeshRecognizeParams,
+    MeshRecognizeResult, MeshRegionReply, MeshSectionParams, MeshSketchParams, MeshSketchResult,
+};
 use crate::schema::{TypedContract, output_schema_for};
 use crate::{
     Result, Sel, Session,
@@ -20,6 +23,9 @@ use crate::{
 const RECOGNIZE_CONTRACT: TypedContract<MeshRecognizeParams> = TypedContract::new();
 const FIT_CONTRACT: TypedContract<MeshFitParams> = TypedContract::new();
 const SKETCH_CONTRACT: TypedContract<MeshSketchParams> = TypedContract::new();
+const SECTION_CONTRACT: TypedContract<MeshSectionParams> = TypedContract::new();
+const ALIGN_CONTRACT: TypedContract<MeshAlignParams> = TypedContract::new();
+const DEVIATION_CONTRACT: TypedContract<MeshDeviationParams> = TypedContract::new();
 
 pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("mesh.convert", "Convert Mesh", convert)
@@ -29,12 +35,28 @@ pub static COMMANDS: &[CommandSpec] = &[
         .icon("import")
         .contract(&FIT_CONTRACT)
         .output(output_schema_for::<FeatureResult>)
-        .params("body?: mesh body name (default: the selected mesh body); tolerance?: length expression (default 0.05 mm); picks?: [{point: [x,y,z] on the mesh (body coordinates), kind?: auto|plane|cylinder|cone|sphere}]; all_surfaces?: bool: one solid per picked surface, to build the part from by hand: a plane's material side as a block over the whole mesh, a cylinder or cone over its region's length (a little longer, so a bore's solid cuts through), a sphere whole; the mesh body stays; name?"),
+        .params("body?: mesh body name (default: the selected mesh body); tolerance?: length expression (default 0.05 mm); picks?: [{point: [x,y,z] on the mesh (body coordinates), kind?: auto|plane|cylinder|cone|sphere|torus}]; all_surfaces?: bool; surfaces?: bool sheets instead of solids; round?: length grid sizes are rounded to within the tolerance: one solid per picked surface, to build the part from by hand: a plane's material side as a block over the whole mesh, a cylinder or cone over its region's length (a little longer, so a bore's solid cuts through), a sphere whole; the mesh body stays; name?"),
     CommandSpec::new("mesh.sketch_outline", "Sketch from Surface", crate::checked!("mesh.sketch_outline", sketch_outline))
         .icon("sketch")
         .contract(&SKETCH_CONTRACT)
         .output(output_schema_for::<MeshSketchResult>)
-        .params("body?: mesh body name (default: the selected mesh body); point: [x,y,z] on the surface (body coordinates); kind?: auto|plane|cylinder|cone; tolerance?: length expression (default 0.05 mm); name?: a new sketch with the surface's outline and no facets: a plane's boundary as lines, arcs and circles in that plane, a cylinder's or cone's circle in the plane across its axis"),
+        .params("body?: mesh body name (default: the selected mesh body); point: [x,y,z] on the surface (body coordinates); kind?: auto|plane|cylinder|cone|torus; tolerance?: length expression (default 0.05 mm); round?: length grid; name?: a new sketch with the surface's outline and no facets: a plane's boundary as lines, arcs and circles in that plane, a cylinder's or cone's circle in the plane across its axis"),
+    CommandSpec::new("mesh.section_sketch", "Section Sketch", crate::checked!("mesh.section_sketch", section_sketch))
+        .icon("sketch")
+        .contract(&SECTION_CONTRACT)
+        .output(output_schema_for::<MeshSketchResult>)
+        .params("body?: mesh body name (default: the selected mesh body); plane?: XY|XZ|YZ (default XY); offset?: length expression along the plane's normal (default 0); tolerance?: length expression (default 0.05 mm); name?: a new sketch with the mesh's section by the plane as lines, arcs and circles, without facets"),
+    CommandSpec::new("mesh.align", "Align Mesh", crate::checked!("mesh.align", align))
+        .icon("move")
+        .contract(&ALIGN_CONTRACT)
+        .output(output_schema_for::<MeshAlignResult>)
+        .params("body?: mesh body name (default: the selected mesh body); centred?: bool (default true: centred on Z, else corner at the origin); tolerance?: length expression (default 0.05 mm): turn and move the mesh square onto the model axes, its largest flat face down on XY (a solid.move)"),
+    CommandSpec::new("mesh.deviation", "Mesh Deviation", crate::checked!("mesh.deviation", deviation))
+        .icon("inspect")
+        .noundo()
+        .contract(&DEVIATION_CONTRACT)
+        .output(output_schema_for::<MeshDeviationResult>)
+        .params("solid: solid body name; body?: mesh body name (default: the selected mesh body); tolerance?: length expression (default 0.05 mm): how far the mesh's vertices lie from the solid (max, mean, rms, share within the tolerance, farthest points; negative inside the solid); changes nothing"),
     CommandSpec::new("mesh.recognize", "Recognize Surface", crate::checked!("mesh.recognize", recognize))
         .icon("inspect")
         .noundo()
@@ -85,8 +107,8 @@ fn convert(s: &mut Session, p: &Value) -> Result<Value> {
 fn kind(p: &Value, cmd: &str) -> Result<SurfaceKind> {
     match p.get("kind") {
         None | Some(Value::Null) => Ok(SurfaceKind::Auto),
-        Some(Value::String(k)) => SurfaceKind::parse(k).ok_or_else(|| bad(cmd, "`kind` must be auto, plane, cylinder, cone or sphere")),
-        Some(_) => Err(bad(cmd, "`kind` must be auto, plane, cylinder, cone or sphere")),
+        Some(Value::String(k)) => SurfaceKind::parse(k).ok_or_else(|| bad(cmd, "`kind` must be auto, plane, cylinder, cone, sphere or torus")),
+        Some(_) => Err(bad(cmd, "`kind` must be auto, plane, cylinder, cone, sphere or torus")),
     }
 }
 
@@ -151,6 +173,10 @@ fn fit_bodies(s: &mut Session, p: &Value) -> Result<Value> {
     let picks = picks(p, cmd)?;
     let all_surfaces = bool_(p, "all_surfaces").unwrap_or(false);
     let surfaces = bool_(p, "surfaces").unwrap_or(false);
+    let round = expr(p, "round");
+    if let Some(r) = &round {
+        check_expr(s, r, Kind::Length, cmd, "round")?;
+    }
     if picks.is_empty() && !all_surfaces {
         return Err(bad(cmd, "pick at least one surface on the mesh (or set all_surfaces: true)"));
     }
@@ -162,15 +188,13 @@ fn fit_bodies(s: &mut Session, p: &Value) -> Result<Value> {
     // The solids belong with the mesh, in its component's own frame.
     let active_component = std::mem::replace(&mut s.active_component, owner);
     let active_occurrence_path = s.active_occurrence_path.take();
-    let result = add_feature(s, p, FeatureKind::MeshFit { body: body.into(), tolerance, picks, all_surfaces, surfaces });
+    let result = add_feature(s, p, FeatureKind::MeshFit { body: body.into(), tolerance, picks, all_surfaces, surfaces, round });
     s.active_component = active_component;
     s.active_occurrence_path = active_occurrence_path;
     result
 }
 
 fn sketch_outline(s: &mut Session, p: &Value) -> Result<Value> {
-    use solidcraft_geom::Seg2;
-    use solidcraft_io::Geom2;
     let cmd = "mesh.sketch_outline";
     let state = s.model.state();
     let body = target(s, p, cmd)?;
@@ -184,7 +208,125 @@ fn sketch_outline(s: &mut Session, p: &Value) -> Result<Value> {
     let tolerance = expr(p, "tolerance").unwrap_or_else(|| "0.05 mm".into());
     let tolerance = s.doc.eval(&tolerance, Kind::Length).map_err(|e| bad(cmd, format!("tolerance: {e}")))?;
     let point = p.get("point").and_then(vec3).ok_or_else(|| bad(cmd, "`point` must be [x, y, z] on the mesh"))?;
-    let (plane, regions) = solidcraft_kernel::surface_outline(&source.body, point, kind(p, cmd)?, tolerance).map_err(|e| bad(cmd, e.to_string()))?;
+    let round = match expr(p, "round") {
+        Some(r) => s.doc.eval(&r, Kind::Length).map_err(|e| bad(cmd, format!("round: {e}")))?,
+        None => 0.,
+    };
+    let (plane, regions) =
+        solidcraft_kernel::surface_outline(&source.body, point, kind(p, cmd)?, tolerance, round).map_err(|e| bad(cmd, e.to_string()))?;
+    outline_sketch(s, p, cmd, &plane, &regions, tolerance)
+}
+
+/// A mesh body named by `body` (or selected), checked to be a mesh.
+fn mesh_body(s: &Session, p: &Value, cmd: &str) -> Result<(String, solidcraft_kernel::Body)> {
+    let body = target(s, p, cmd)?;
+    let state = s.model.state();
+    let source = state.body(&body).ok_or_else(|| bad(cmd, format!("no body `{body}`")))?;
+    if !source.body.is_mesh() {
+        return Err(bad(cmd, "select a mesh body"));
+    }
+    Ok((body, source.body.clone()))
+}
+
+fn tolerance_of(s: &Session, p: &Value, cmd: &str) -> Result<f64> {
+    let tolerance = expr(p, "tolerance").unwrap_or_else(|| "0.05 mm".into());
+    s.doc.eval(&tolerance, Kind::Length).map_err(|e| bad(cmd, format!("tolerance: {e}")))
+}
+
+fn section_sketch(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "mesh.section_sketch";
+    let (_, body) = mesh_body(s, p, cmd)?;
+    if s.active_sketch.is_some() {
+        return Err(bad(cmd, "finish the sketch being edited first"));
+    }
+    let tolerance = tolerance_of(s, p, cmd)?;
+    let name = str_(p, "plane").unwrap_or("XY");
+    let mut plane = solidcraft_geom::Plane::named(name).ok_or_else(|| bad(cmd, "`plane` must be XY, XZ or YZ"))?;
+    if let Some(o) = expr(p, "offset") {
+        let o = s.doc.eval(&o, Kind::Length).map_err(|e| bad(cmd, format!("offset: {e}")))?;
+        plane.origin = plane.origin + plane.normal() * o;
+    }
+    let regions = solidcraft_kernel::section_outline(&body, &plane, tolerance).map_err(|e| bad(cmd, e.to_string()))?;
+    outline_sketch(s, p, cmd, &plane, &regions, tolerance)
+}
+
+fn align(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "mesh.align";
+    let (name, body) = mesh_body(s, p, cmd)?;
+    let tolerance = tolerance_of(s, p, cmd)?;
+    let centred = bool_(p, "centred").unwrap_or(true);
+    let (t, axis, angle) = solidcraft_kernel::align_to_axes(&body, tolerance, centred).map_err(|e| bad(cmd, e.to_string()))?;
+    let angle = angle.to_degrees();
+    let mut q = serde_json::json!({"bodies": [name], "translate": [t.x, t.y, t.z]});
+    if angle.abs() > 1e-9 {
+        q["axis"] = serde_json::json!([axis.x, axis.y, axis.z]);
+        q["angle"] = serde_json::json!(format!("{angle} deg"));
+    }
+    (super::find_command("solid.move").ok_or_else(|| bad(cmd, "solid.move"))?.run)(s, &q)?;
+    serde_json::to_value(MeshAlignResult {
+        body: name,
+        axis: [axis.x, axis.y, axis.z],
+        angle,
+        translate: [t.x, t.y, t.z],
+        param_warnings: Vec::new(),
+    })
+    .map_err(|e| bad(cmd, e.to_string()))
+}
+
+fn deviation(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "mesh.deviation";
+    let solid = str_(p, "solid").filter(|b| !b.trim().is_empty()).ok_or_else(|| bad(cmd, "`solid` must name a solid body"))?.to_owned();
+    let mesh = match str_(p, "body").filter(|b| !b.trim().is_empty()) {
+        Some(b) => b.to_owned(),
+        None => {
+            // The selection may hold the solid too: the mesh is the selected mesh body.
+            let state = s.model.state();
+            let meshes: Vec<String> = s
+                .selection
+                .iter()
+                .filter_map(|x| if let Sel::Body { name } = x { Some(name.clone()) } else { None })
+                .filter(|n| state.body(n).is_some_and(|b| b.body.is_mesh()))
+                .collect();
+            match meshes.as_slice() {
+                [one] => one.clone(),
+                [] => return Err(bad(cmd, "select a mesh body")),
+                _ => return Err(bad(cmd, "select one mesh body")),
+            }
+        }
+    };
+    let tolerance = tolerance_of(s, p, cmd)?;
+    let state = s.model.state();
+    let a = state.body(&solid).ok_or_else(|| bad(cmd, format!("no body `{solid}`")))?;
+    let b = state.body(&mesh).ok_or_else(|| bad(cmd, format!("no body `{mesh}`")))?;
+    if !b.body.is_mesh() {
+        return Err(bad(cmd, format!("`{mesh}` is not a mesh body")));
+    }
+    let d = solidcraft_kernel::mesh_deviation(&a.body, &b.body, tolerance).map_err(|e| bad(cmd, e.to_string()))?;
+    serde_json::to_value(MeshDeviationResult {
+        solid,
+        body: mesh,
+        max: d.max,
+        mean: d.mean,
+        rms: d.rms,
+        within: d.within,
+        vertices: d.vertices,
+        worst: d.worst.into_iter().map(|(q, distance)| MeshDeviationPoint { point: [q.x, q.y, q.z], distance }).collect(),
+        param_warnings: Vec::new(),
+    })
+    .map_err(|e| bad(cmd, e.to_string()))
+}
+
+/// A new sketch in `plane` with `regions`' loops: circles whole, else lines and arcs.
+fn outline_sketch(
+    s: &mut Session,
+    p: &Value,
+    cmd: &str,
+    plane: &solidcraft_geom::Plane,
+    regions: &[solidcraft_geom::Region2],
+    tolerance: f64,
+) -> Result<Value> {
+    use solidcraft_geom::Seg2;
+    use solidcraft_io::Geom2;
     let mut geom = Vec::new();
     for lp in regions.iter().flat_map(|r| std::iter::once(&r.outer).chain(&r.holes)) {
         // A loop of arcs of one circle all round is that circle.

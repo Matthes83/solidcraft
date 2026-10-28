@@ -1778,6 +1778,11 @@ pub enum FeatureKind {
         /// Sheets on the surfaces, bounded as their regions are, instead of solids.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         surfaces: bool,
+        /// Sizes rounded to this grid where that stays within the tolerance (7.98 measured is
+        /// 8 drawn): radii, axis-aligned plane offsets and axis positions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[walk(length = "Round to")]
+        round: Option<Expr>,
     },
     /// Mesh bodies imported from a 3MF or STL file, embedded in the design.
     MeshImport {

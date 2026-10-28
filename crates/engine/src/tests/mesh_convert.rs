@@ -681,3 +681,33 @@ fn conversion_from_another_branch_names_the_component_to_activate() {
     assert_eq!(s.doc.to_json(), before);
     assert_eq!((s.active_component, s.active_occurrence_path.clone()), context);
 }
+
+/// The reverse-engineering tools on a scanned box: squared onto the axes, sectioned into a
+/// sketch, and a solid checked against it.
+#[test]
+fn a_turned_mesh_is_aligned_sectioned_and_checked() {
+    let mut s = imported_box();
+    run(&mut s, "solid.move", json!({"bodies": ["Mesh"], "translate": [7, -3, 11], "axis": [1, 2, 3], "angle": "37 deg"}));
+    let r = run(&mut s, "mesh.align", json!({"body": "Mesh", "tolerance": "0.01 mm", "centred": false}));
+    assert_eq!(r["body"], "Mesh");
+    let state = s.model.state();
+    let b = state.body("Mesh").unwrap().body.outline_bounds();
+    let (lo, hi) = (b.min, b.max);
+    assert!(lo.len() < 1e-6, "corner at the origin: {lo:?}");
+    let mut size = [hi.x - lo.x, hi.y - lo.y, hi.z - lo.z];
+    size.sort_by(f64::total_cmp);
+    for (got, want) in size.iter().zip([10., 20., 30.]) {
+        assert!((got - want).abs() < 1e-6, "square on the axes: {size:?}");
+    }
+    // One undo puts it back where it was.
+    let height = hi.z;
+    run(&mut s, "edit.undo", json!({}));
+    run(&mut s, "edit.redo", json!({}));
+    let r = run(&mut s, "mesh.section_sketch", json!({"body": "Mesh", "plane": "XY", "offset": format!("{} mm", height / 2.), "name": "Cut"}));
+    assert_eq!(r["curves"], 4, "{r}");
+    run(&mut s, "solid.box", json!({"corner": [0, 0, 0], "length": hi.x, "width": hi.y, "height": hi.z, "body_name": "Rebuilt"}));
+    let r = run(&mut s, "mesh.deviation", json!({"solid": "Rebuilt", "body": "Mesh", "tolerance": "0.01 mm"}));
+    assert!(r["max"].as_f64().unwrap() < 1e-3 && r["within"].as_f64().unwrap() > 0.999, "{r}");
+    let r = s.execute("mesh.deviation", &json!({"solid": "Mesh", "body": "Rebuilt"}));
+    assert!(r.is_err(), "the solid must not be the mesh");
+}

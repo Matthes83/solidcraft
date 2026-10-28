@@ -101,6 +101,11 @@ pub struct MeshFitParams {
     /// have no sheet yet. Default: false.
     #[serde(default)]
     pub surfaces: Option<bool>,
+    /// Round sizes to this grid where that moves a surface by no more than the tolerance
+    /// (7.98 measured is 8 drawn): radii, offsets of planes square to a model axis, positions of
+    /// axes along one. Default: no rounding.
+    #[serde(default)]
+    pub round: Option<LengthExpr>,
     #[serde(flatten, deserialize_with = "feature_common")]
     pub common: FeatureCommon,
 }
@@ -123,6 +128,10 @@ pub struct MeshSketchParams {
     /// 1 mm. Default: 0.05 mm.
     #[serde(default)]
     pub tolerance: Option<LengthExpr>,
+    /// Round sizes to this grid within the tolerance, as `mesh.fit_bodies` does. Default: no
+    /// rounding.
+    #[serde(default)]
+    pub round: Option<LengthExpr>,
     /// The sketch's name.
     #[serde(default)]
     pub name: Option<String>,
@@ -135,6 +144,103 @@ pub struct MeshSketchResult {
     pub sketch: u64,
     /// Curves drawn.
     pub curves: usize,
+    /// In the warn parameter-check mode: what the call's parameters got wrong.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub param_warnings: Vec<String>,
+}
+
+/// A new sketch with the section of a mesh body by an origin plane, the mesh's facets fitted
+/// away: lines, arcs and circles, closed loops.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct MeshSectionParams {
+    /// The mesh body. Default: the selected mesh body.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// `XY`, `XZ` or `YZ`. Default: XY.
+    #[serde(default)]
+    pub plane: Option<String>,
+    /// How far along the plane's normal the section lies. Default: 0.
+    #[serde(default)]
+    pub offset: Option<LengthExpr>,
+    /// How far the fitted curves may lie from the mesh's section, a length between 0.000001
+    /// and 1 mm. Default: 0.05 mm.
+    #[serde(default)]
+    pub tolerance: Option<LengthExpr>,
+    /// The sketch's name.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// Turn and move a mesh body square onto the model axes: its largest flat face down on XY, its
+/// main directions along X and Y. A `solid.move` of the body, undoable as one step.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct MeshAlignParams {
+    /// The mesh body. Default: the selected mesh body.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// Centre the part on the Z axis (else its corner at the origin), resting on XY. Default:
+    /// true.
+    #[serde(default)]
+    pub centred: Option<bool>,
+    /// The recognition tolerance, a length between 0.000001 and 1 mm. Default: 0.05 mm.
+    #[serde(default)]
+    pub tolerance: Option<LengthExpr>,
+}
+
+/// What `mesh.align` returns.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MeshAlignResult {
+    /// The body moved.
+    pub body: String,
+    /// The move: a turn by `angle` degrees about `axis` through the origin, then `translate` mm.
+    pub axis: [f64; 3],
+    pub angle: f64,
+    pub translate: [f64; 3],
+    /// In the warn parameter-check mode: what the call's parameters got wrong.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub param_warnings: Vec<String>,
+}
+
+/// How far a mesh body lies from a solid made from it. Changes nothing.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct MeshDeviationParams {
+    /// The solid body to check.
+    pub solid: String,
+    /// The mesh body. Default: the selected mesh body.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// The allowed deviation, a length between 0.000001 and 1 mm. Default: 0.05 mm.
+    #[serde(default)]
+    pub tolerance: Option<LengthExpr>,
+}
+
+/// One of the farthest mesh vertices.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MeshDeviationPoint {
+    /// The vertex, in mm.
+    pub point: [f64; 3],
+    /// Its distance from the solid's surface in mm: negative inside the solid (the solid has
+    /// material the mesh doesn't), positive outside (the solid lacks material).
+    pub distance: f64,
+}
+
+/// What `mesh.deviation` returns.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct MeshDeviationResult {
+    pub solid: String,
+    pub body: String,
+    /// Largest, mean and root-mean-square distance of the mesh's vertices from the solid, mm.
+    pub max: f64,
+    pub mean: f64,
+    pub rms: f64,
+    /// Share of the vertices within the tolerance, 0 to 1.
+    pub within: f64,
+    pub vertices: usize,
+    /// The farthest vertices, farthest first.
+    pub worst: Vec<MeshDeviationPoint>,
     /// In the warn parameter-check mode: what the call's parameters got wrong.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub param_warnings: Vec<String>,

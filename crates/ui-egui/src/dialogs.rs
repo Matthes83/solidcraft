@@ -96,8 +96,10 @@ const WALL_LABELS: [&str; 4] = ["Center", "Inside", "Outside", "Two Sides"];
 const EXTRUDE_ACCEPT: Accept = PROFILES | PLANAR_FACES;
 const THIN_ACCEPT: Accept = PROFILES | CURVES;
 /// The kinds of surface a click on a mesh asks for, and their labels.
-pub(crate) const MESH_KINDS: [&str; 5] = ["auto", "plane", "cylinder", "cone", "sphere"];
-pub(crate) const MESH_KIND_LABELS: [&str; 5] = ["Auto", "Plane", "Cylinder", "Cone", "Sphere"];
+pub(crate) const MESH_KINDS: [&str; 6] = ["auto", "plane", "cylinder", "cone", "sphere", "torus"];
+pub(crate) const MESH_KIND_LABELS: [&str; 6] = ["Auto", "Plane", "Cylinder", "Cone", "Sphere", "Torus"];
+/// The commands of [`Kind::MeshTool`], by its `tool`.
+pub(crate) const MESH_TOOLS: [&str; 3] = ["mesh.align", "mesh.section_sketch", "mesh.deviation"];
 const HOLE_TYPES: [&str; 3] = ["simple", "counterbore", "countersink"];
 const HOLE_LABELS: [&str; 3] = ["Simple", "Counterbore", "Countersink"];
 
@@ -230,6 +232,19 @@ crate::dialog_descriptor::dialog_descriptors! {
                 /// What OK makes: the converted mesh (0), a solid per clicked surface (1), a
                 /// sheet per clicked surface (2) or a sketch of each clicked surface's outline (3).
                 result: usize,
+                /// The grid sizes are rounded to (empty: as measured), for results 1 to 3.
+                round: String,
+            },
+            /// A reverse-engineering tool on a mesh body ([`MESH_TOOLS`]): square it onto the
+            /// model axes (0), sketch its section by an origin plane (1), or check a solid
+            /// against it (2, which only reports: `report` is the last check, by its inputs).
+            MeshTool {
+                tool: usize,
+                tolerance: String,
+                /// XY, XZ or YZ, and the offset along its normal (section).
+                plane: usize,
+                offset: String,
+                report: Option<(String, Vec<String>)>,
             },
             /// A construction axis, point or plane made from picks alone (#2474): input `i` is the
             /// command's parameter `keys[i]`, and `t` (along a path) when it takes one.
@@ -855,9 +870,32 @@ impl Dialog {
                 vec![SelInput::new("Objects", BODIES, true), SelInput::new("Path", CURVES, true)],
             ),
             "mesh.convert" => Dialog::new(
-                Kind::MeshConvert { tolerance: crate::length_input::model(&s.doc, 0.05), kinds: Vec::new(), found: Vec::new(), result: 0 },
+                Kind::MeshConvert {
+                    tolerance: crate::length_input::model(&s.doc, 0.05),
+                    kinds: Vec::new(),
+                    found: Vec::new(),
+                    result: 0,
+                    round: String::new(),
+                },
                 vec![SelInput::new("Mesh body", BODIES, false), SelInput::new("Surfaces", FACES, true)],
             ),
+            "mesh.align" | "mesh.section_sketch" | "mesh.deviation" => {
+                let tool = MESH_TOOLS.iter().position(|t| *t == id).unwrap_or(0);
+                let mut inputs = vec![SelInput::new("Mesh body", BODIES, false)];
+                if tool == 2 {
+                    inputs.push(SelInput::new("Solid", BODIES, false));
+                }
+                Dialog::new(
+                    Kind::MeshTool {
+                        tool,
+                        tolerance: crate::length_input::model(&s.doc, 0.05),
+                        plane: 0,
+                        offset: length_default(s, "0"),
+                        report: None,
+                    },
+                    inputs,
+                )
+            }
             "construct.plane.midplane" => Dialog::new(
                 Kind::Midplane,
                 vec![SelInput::new("First plane", PLANES | PLANAR_FACES, false), SelInput::new("Second plane", PLANES | PLANAR_FACES, false)],
@@ -2081,6 +2119,9 @@ fn title(k: &Kind) -> &'static str {
         Kind::Material { .. } => "PHYSICAL MATERIAL",
         Kind::Midplane => "MIDPLANE",
         Kind::MeshConvert { .. } => "CONVERT MESH",
+        Kind::MeshTool { tool: 0, .. } => "ALIGN MESH",
+        Kind::MeshTool { tool: 1, .. } => "SECTION SKETCH",
+        Kind::MeshTool { .. } => "MESH DEVIATION",
         Kind::Construct { title, .. } => title,
         Kind::PathPlane { .. } => "PLANE ALONG PATH",
         Kind::Rib { web: false, .. } => "RIB",
@@ -2774,7 +2815,7 @@ pub(crate) fn sync_feature_edit_sketch(app: &mut SolveApp) {
 /// says what it does.
 pub(crate) fn action_labels(kind: &Kind) -> (&'static str, &'static str) {
     match kind {
-        Kind::Measure { .. } => ("", "Close"),
+        Kind::Measure { .. } | Kind::MeshTool { tool: 2, .. } => ("", "Close"),
         Kind::ConfirmDelete { .. } => ("Delete", "Cancel"),
         Kind::SaveMesh(k) => (crate::dialogs_save_mesh::button(k), "Cancel"),
         Kind::ViewDxf { .. } => ("Export DXF…", "Cancel"),
@@ -2873,7 +2914,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let heading = if d.editing.is_some() { crate::i18n::format("dialog.edit_title", &[("title", tr(raw_title))]) } else { tr(raw_title).to_string() };
     let frame = crate::ui_kit::Panel::feature_frame(ctx, app.ui.layout, side);
     // OK is offered once the inputs make a feature.
-    let has_ok = !matches!(d.kind, Kind::Sketch | Kind::Measure { .. });
+    let has_ok = !matches!(d.kind, Kind::Sketch | Kind::Measure { .. } | Kind::MeshTool { tool: 2, .. });
     let valid = match &d.kind {
         Kind::Sketch => false,
         // Nothing picked is an answer too: OK empties the chat's tray.
@@ -3047,7 +3088,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let nothing_focused = ctx.memory(|m| m.focused().is_none());
     let canvas_enter = enter_free && ctx.memory(|m| m.had_focus_last_frame(egui::Id::new("sc_canvas_value")));
     // Tables (configurations, a study's keys) take Enter for their cells.
-    let enter_applies = !matches!(d.kind, Kind::Sketch | Kind::Measure { .. } | Kind::ConfirmDelete { .. })
+    let enter_applies = !matches!(d.kind, Kind::Sketch | Kind::Measure { .. } | Kind::MeshTool { tool: 2, .. } | Kind::ConfirmDelete { .. })
         && !matches!(&d.kind, Kind::Motion(k) if k.wide())
         && !matches!(&d.kind, Kind::Material { editor, .. } if editor.editing());
     let report_active = app.issue_report.draft.is_some();
@@ -4144,7 +4185,18 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
                 None => ("construct.plane.offset", json!({"base": base})),
             }
         }
-        Kind::MeshConvert { tolerance, kinds, result, .. } => {
+        Kind::MeshTool { tool, tolerance, plane, offset, .. } => {
+            let Some(Sel::Body { name: body }) = sels(d, 0).first() else { return Err("pick the mesh body".into()) };
+            match tool {
+                0 => ("mesh.align", json!({"body": body, "tolerance": tolerance})),
+                1 => {
+                    let plane = ["XY", "XZ", "YZ"].get(*plane).copied().unwrap_or("XY");
+                    ("mesh.section_sketch", json!({"body": body, "plane": plane, "offset": offset, "tolerance": tolerance}))
+                }
+                _ => return Err("the deviation check only reports".into()),
+            }
+        }
+        Kind::MeshConvert { tolerance, kinds, result, round, .. } => {
             // The mesh body, or the one its surfaces were clicked on.
             let body = match sels(d, 0).first() {
                 Some(Sel::Body { name }) => Some(name.clone()),
@@ -4176,6 +4228,9 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
                         let mut p = pick;
                         p["body"] = json!(body);
                         p["tolerance"] = json!(tolerance);
+                        if !round.trim().is_empty() {
+                            p["round"] = json!(round);
+                        }
                         ("mesh.sketch_outline".to_string(), p)
                     })
                     .collect());
@@ -4184,7 +4239,11 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
                 if picks.is_empty() && !d.extra.get("all_surfaces").and_then(Value::as_bool).unwrap_or(false) {
                     return Err("click the surfaces to make bodies from".into());
                 }
-                ("mesh.fit_bodies", json!({"body": body, "tolerance": tolerance, "picks": picks, "surfaces": *result == 2}))
+                let mut p = json!({"body": body, "tolerance": tolerance, "picks": picks, "surfaces": *result == 2});
+                if !round.trim().is_empty() {
+                    p["round"] = json!(round);
+                }
+                ("mesh.fit_bodies", p)
             } else if picks.is_empty() {
                 ("mesh.convert", json!({"body": body, "tolerance": tolerance}))
             } else {
