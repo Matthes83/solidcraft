@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::types::{LengthExpr, Point3};
+use super::types::{FeatureCommon, LengthExpr, Point3, feature_common};
 
 /// Recognise the analytic surface of a mesh body at a point: the connected region around it
 /// that one plane, cylinder, cone or sphere fits within the tolerance, with that surface. With
@@ -63,6 +63,41 @@ pub struct MeshRecognizeResult {
     /// In the warn parameter-check mode: what the call's parameters got wrong.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub param_warnings: Vec<String>,
+}
+
+/// A surface picked on the mesh.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct MeshPickParam {
+    /// A point on the mesh, in mm in the body's coordinates.
+    pub point: Point3,
+    /// `auto`, `plane`, `cylinder`, `cone` or `sphere`. Default: auto.
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+/// One solid per surface picked on a mesh body, to build the part from by hand: a plane's
+/// material side as a block over the whole mesh, a cylinder or cone over the length its region
+/// covers (a little longer at both ends, so a bore's solid cuts through), a sphere whole. Each
+/// is named after its surface; the mesh body stays.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct MeshFitParams {
+    /// The mesh body. Default: the selected mesh body.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// How far the mesh's vertices may lie from a surface, a length between 0.000001 and 1 mm.
+    /// Default: 0.05 mm.
+    #[serde(default)]
+    pub tolerance: Option<LengthExpr>,
+    /// The surfaces, in order. Required unless `all_surfaces` is true.
+    #[serde(default)]
+    pub picks: Option<Vec<MeshPickParam>>,
+    /// A solid for every surface of the mesh. Default: false.
+    #[serde(default)]
+    pub all_surfaces: Option<bool>,
+    #[serde(flatten, deserialize_with = "feature_common")]
+    pub common: FeatureCommon,
 }
 
 #[cfg(test)]

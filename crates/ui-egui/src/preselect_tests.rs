@@ -2581,6 +2581,48 @@ fn convert_mesh_recognises_clicked_surfaces_and_builds_the_drill_point() {
     assert!((k::measure(body).unwrap().volume - expected).abs() < 0.2);
 }
 
+/// Bodies from surfaces: with that result chosen, OK makes one solid per clicked surface and
+/// keeps the mesh, to build the part from by hand.
+#[test]
+fn convert_mesh_can_make_a_body_per_clicked_surface() {
+    use solidcraft_engine::doc::{Document, FeatureKind, MeshData};
+    let block = solidcraft_engine::kernel::box_solid(Vec3::ZERO, Vec3::new(10., 20., 30.)).unwrap();
+    let mesh = block.tessellate(0.01).unwrap();
+    let mut doc = Document::default();
+    doc.add_feature(
+        FeatureKind::MeshImport {
+            file: "box.stl".into(),
+            meshes: vec![MeshData {
+                name: "Mesh".into(),
+                positions: mesh.positions.iter().flat_map(|p| [p.x, p.y, p.z]).collect(),
+                triangles: mesh.triangles.iter().flatten().copied().collect(),
+                color: None,
+            }],
+        },
+        Some("Imported mesh"),
+    )
+    .unwrap();
+    let mut h = crate::scenario::Harness::new();
+    h.app.session = Session::new(doc);
+    h.app.session.selection = vec![Sel::Body { name: "Mesh".into() }];
+    h.app.start("mesh.convert");
+    h.frames(1);
+    let d = h.app.dialog.as_mut().unwrap();
+    if let Kind::MeshConvert { separate, .. } = &mut d.kind {
+        *separate = true;
+    }
+    d.active = 1;
+    d.pick(&h.app.session, Sel::Face { body: "Mesh".into(), index: 0, point: Vec3::new(5., 10., 30.) });
+    d.pick(&h.app.session, Sel::Face { body: "Mesh".into(), index: 0, point: Vec3::new(10., 10., 15.) });
+    h.frames(2);
+    h.step(&json!({"key":"Enter"})).unwrap();
+    assert!(h.app.dialog.is_none(), "{:?}", h.app.dialog.as_ref().and_then(|d| d.error.clone()));
+    let state = h.app.session.model.state();
+    assert!(state.body("Mesh").unwrap().body.is_mesh(), "the mesh stays");
+    let planes = state.bodies.iter().filter(|b| b.name.starts_with("Plane")).count();
+    assert_eq!(planes, 2, "{:?}", state.bodies.iter().map(|b| &b.name).collect::<Vec<_>>());
+}
+
 /// #3001: Convert Mesh opens a dialog instead of failing with "select a mesh body". With the
 /// mesh selected first it takes it, and OK rebuilds it as faces.
 #[test]

@@ -227,6 +227,8 @@ crate::dialog_descriptor::dialog_descriptors! {
                 tolerance: String,
                 kinds: Vec<usize>,
                 found: Vec<(Vec3, usize, String)>,
+                /// Make one solid per clicked surface instead of converting the mesh.
+                separate: bool,
             },
             /// A construction axis, point or plane made from picks alone (#2474): input `i` is the
             /// command's parameter `keys[i]`, and `t` (along a path) when it takes one.
@@ -852,7 +854,7 @@ impl Dialog {
                 vec![SelInput::new("Objects", BODIES, true), SelInput::new("Path", CURVES, true)],
             ),
             "mesh.convert" => Dialog::new(
-                Kind::MeshConvert { tolerance: crate::length_input::model(&s.doc, 0.05), kinds: Vec::new(), found: Vec::new() },
+                Kind::MeshConvert { tolerance: crate::length_input::model(&s.doc, 0.05), kinds: Vec::new(), found: Vec::new(), separate: false },
                 vec![SelInput::new("Mesh body", BODIES, false), SelInput::new("Surfaces", FACES, true)],
             ),
             "construct.plane.midplane" => Dialog::new(
@@ -4141,7 +4143,7 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
                 None => ("construct.plane.offset", json!({"base": base})),
             }
         }
-        Kind::MeshConvert { tolerance, kinds, .. } => {
+        Kind::MeshConvert { tolerance, kinds, separate, .. } => {
             // The mesh body, or the one its surfaces were clicked on.
             let body = match sels(d, 0).first() {
                 Some(Sel::Body { name }) => Some(name.clone()),
@@ -4162,7 +4164,12 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
                     _ => None,
                 })
                 .collect();
-            if picks.is_empty() {
+            if *separate {
+                if picks.is_empty() && !d.extra.get("all_surfaces").and_then(Value::as_bool).unwrap_or(false) {
+                    return Err("click the surfaces to make bodies from".into());
+                }
+                ("mesh.fit_bodies", json!({"body": body, "tolerance": tolerance, "picks": picks}))
+            } else if picks.is_empty() {
                 ("mesh.convert", json!({"body": body, "tolerance": tolerance}))
             } else {
                 ("mesh.convert", json!({"body": body, "tolerance": tolerance, "picks": picks}))

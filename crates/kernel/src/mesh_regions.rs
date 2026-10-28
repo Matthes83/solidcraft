@@ -1003,6 +1003,97 @@ pub(crate) fn snap_to_picks(
     Ok((TriMesh { positions, triangles }, crate::mesh_convert_milled::Features { solids }))
 }
 
+/// One solid per picked surface, for building a part by hand from what the mesh shows (each
+/// named after its surface, such as `Cylinder Ø8.000`):
+/// - a plane: the material side of it, as a block over the whole mesh (a slab to cut by);
+/// - a cylinder or cone: the solid of revolution over the region's length, a little longer at
+///   both ends, so a bore's solid cuts through cleanly;
+/// - a sphere: the whole ball.
+///
+/// Each surface is regularised as for [`crate::convert_mesh_with_regions`] (directions within
+/// half a degree made exact), so blocks and bores meet square. The mesh is not changed.
+pub fn fit_bodies(body: &Body, tolerance: f64, picks: &[(Vec3, SurfaceKind)]) -> Result<Vec<(String, Body)>> {
+    crate::guard("fit bodies to mesh surfaces", || {
+        checked_tolerance(tolerance)?;
+        if picks.is_empty() || picks.len() > 10_000 || picks.iter().any(|(p, _)| !p.is_finite()) {
+            return Err(invalid("pick at least one surface, at most 10000, at finite points"));
+        }
+        let ctx = context(body, tolerance)?;
+        let n = ctx.triangles.len();
+        let mut claimed = vec![false; n];
+        let mut regions: Vec<MeshRegion> = Vec::new();
+        for (i, (point, kind)) in picks.iter().enumerate() {
+            let seed = ctx.nearest(*point).ok_or_else(|| invalid("empty mesh"))?;
+            if claimed.get(seed as usize).copied().unwrap_or(true) {
+                continue;
+            }
+            let region = grow(&ctx, seed, *kind, tolerance, &claimed)
+                .ok_or_else(|| invalid(&format!("pick {}: no surface of that kind fits the mesh there within {tolerance} mm", i + 1)))?;
+            for t in &region.triangles {
+                if let Some(c) = claimed.get_mut(*t as usize) {
+                    *c = true;
+                }
+            }
+            regions.push(region);
+        }
+        regularize(&mut regions, tolerance);
+        let all = vertices(&ctx, &(0..n).filter_map(|t| u32::try_from(t).ok()).collect::<Vec<_>>());
+        let mut bounds = solidcraft_geom::Aabb3::EMPTY;
+        for p in &all {
+            bounds.add(*p);
+        }
+        let size = bounds.size().len().max(1.);
+        let margin = size * 0.02;
+        let mut out = Vec::new();
+        for region in &regions {
+            let own = vertices(&ctx, &region.triangles);
+            let (name, solid) = match region.surface {
+                Primitive::Plane { point, normal } => {
+                    let u = normal.any_perp().normalized().ok_or_else(|| invalid("degenerate plane"))?;
+                    let v = normal.cross(u);
+                    let plane = solidcraft_geom::Plane::new(point, u, v).ok_or_else(|| invalid("degenerate plane"))?;
+                    let (mut lo, mut hi) =
+                        (solidcraft_geom::Vec2::new(f64::INFINITY, f64::INFINITY), solidcraft_geom::Vec2::new(f64::NEG_INFINITY, f64::NEG_INFINITY));
+                    let mut depth = 0f64;
+                    for p in &all {
+                        let q = plane.to_local(*p);
+                        lo = solidcraft_geom::Vec2::new(lo.x.min(q.x), lo.y.min(q.y));
+                        hi = solidcraft_geom::Vec2::new(hi.x.max(q.x), hi.y.max(q.y));
+                        depth = depth.max(-(*p - point).dot(normal));
+                    }
+                    let (lo, hi) = (lo - solidcraft_geom::Vec2::new(margin, margin), hi + solidcraft_geom::Vec2::new(margin, margin));
+                    let rect = solidcraft_geom::Region2 {
+                        outer: solidcraft_geom::Loop2::polygon(&[
+                            lo,
+                            solidcraft_geom::Vec2::new(hi.x, lo.y),
+                            hi,
+                            solidcraft_geom::Vec2::new(lo.x, hi.y),
+                        ]),
+                        holes: Vec::new(),
+                    };
+                    ("Plane".to_string(), crate::extrude_planar_regions(&plane, &[rect], -(depth + margin), 0.)?)
+                }
+                Primitive::Cylinder { point, axis, radius } => {
+                    let (a, b) =
+                        own.iter().map(|p| (*p - point).dot(axis)).fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), h| (a.min(h), b.max(h)));
+                    if !(b > a) {
+                        return Err(invalid("a picked cylinder has no length"));
+                    }
+                    let solid = crate::cylinder(point + axis * (a - margin), axis, radius, b - a + 2. * margin)?;
+                    (format!("Cylinder Ø{:.3}", 2. * radius), solid)
+                }
+                Primitive::Cone { half_angle, .. } => {
+                    let solid = crate::mesh_convert_milled::feature_solid(&region.surface, &own)?;
+                    (format!("Cone {:.1}°", 2. * half_angle.to_degrees()), solid)
+                }
+                Primitive::Sphere { center, radius } => (format!("Sphere R{radius:.3}"), crate::sphere(center, radius)?),
+            };
+            out.push((name, solid));
+        }
+        Ok(out)
+    })
+}
+
 /// A point on each region [`recognize_all`] finds, kind `Auto`: picks for
 /// [`crate::convert_mesh_with_regions`] covering the whole mesh.
 pub fn picks_for_all(body: &Body, tolerance: f64) -> Result<Vec<(Vec3, SurfaceKind)>> {
@@ -1235,6 +1326,31 @@ mod tests {
         assert!((measured.volume - expected).abs() < 5., "{} vs {expected}", measured.volume);
         assert_eq!(measured.merged.face_types.get("cylinder"), Some(&1), "{:?}", measured.merged.face_types);
         assert!(measured.merged.face_types.get("plane").copied().unwrap_or(0) <= 12, "{:?}", measured.merged.face_types);
+    }
+
+    #[test]
+    fn picked_surfaces_become_bodies_to_build_with() {
+        let part = part();
+        let mesh = mesh_of(&part);
+        let picks = [
+            (Vec3::new(30., 25., 20.), SurfaceKind::Auto),
+            (Vec3::new(16., 15., 14.), SurfaceKind::Auto),
+            (Vec3::new(13.5, 15., 7.4), SurfaceKind::Auto),
+            (Vec3::new(28., 2.5, 10.5), SurfaceKind::Auto),
+        ];
+        let bodies = fit_bodies(&mesh, 0.02, &picks).unwrap();
+        let names: Vec<&str> = bodies.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["Plane", "Cylinder Ø8.000", "Cone 118.0°", "Sphere R5.000"], "{names:?}");
+        // The top face's block lies under z = 20 across the whole part.
+        let top = crate::measure(&bodies[0].1).unwrap().bbox;
+        assert!((top.max.z - 20.).abs() < 1e-6 && top.min.z < 0. && top.min.x < 0. && top.max.x > 40., "{top:?}");
+        // The bore's solid runs past both ends of the bore.
+        let bore = crate::measure(&bodies[1].1).unwrap().bbox;
+        assert!(bore.max.z > 20. && bore.min.z < 8., "{bore:?}");
+        // Cutting the bore and the drill point from the top block leaves the part's hole.
+        let cut = crate::boolean(&bodies[0].1, &bodies[1].1, BoolOp::Cut).unwrap().unwrap();
+        assert!(crate::measure(&cut).unwrap().volume < crate::measure(&bodies[0].1).unwrap().volume);
+        assert!(fit_bodies(&mesh, 0.02, &[]).is_err());
     }
 
     #[test]

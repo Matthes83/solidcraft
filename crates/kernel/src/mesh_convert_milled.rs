@@ -131,7 +131,7 @@ pub(crate) fn convert_milled_with(mesh: &TriMesh, original: &TriMesh, tolerance:
 
 /// The solid a recognised concave cone or sphere cuts: a cone from its apex to the farthest of
 /// its region's vertices, or the whole sphere.
-fn feature_solid(surface: &crate::Primitive, vertices: &[Vec3]) -> Result<Body> {
+pub(crate) fn feature_solid(surface: &crate::Primitive, vertices: &[Vec3]) -> Result<Body> {
     match *surface {
         crate::Primitive::Sphere { center, radius } => crate::sphere(center, radius),
         crate::Primitive::Cone { apex, axis, half_angle } => {

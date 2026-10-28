@@ -195,6 +195,18 @@ fn picked_surfaces_are_recognised_and_complete_the_solid() {
     let all = run(&mut s, "mesh.recognize", json!({"body":name,"all":true}));
     assert!(all["regions"].as_array().unwrap().len() >= 8, "{all}");
     assert!(s.execute("mesh.recognize", &json!({"body":name,"point":[30,25,20],"kind":"sphere"})).is_err());
+    // Bodies from surfaces: one solid per pick, the mesh kept.
+    let made = run(&mut s, "mesh.fit_bodies", json!({"body":name,"picks":[{"point":[30,25,20]},{"point":[16,15,14]},{"point":[13.5,15,7.2]}]}));
+    let state = s.model.state();
+    assert!(state.body(&name).unwrap().body.is_mesh(), "the mesh stays");
+    let names: Vec<&str> = state.bodies.iter().map(|b| b.name.as_str()).collect();
+    assert!(
+        names.iter().any(|n| n.starts_with("Plane"))
+            && names.iter().any(|n| n.starts_with("Cylinder Ø8"))
+            && names.iter().any(|n| n.starts_with("Cone")),
+        "{names:?} {made}"
+    );
+    assert!(s.execute("mesh.fit_bodies", &json!({"body":name})).is_err());
     assert!(s.execute("mesh.convert", &json!({"body":name})).is_err());
     run(&mut s, "mesh.convert", json!({"body":name,"picks":[{"point":[13.5,15,7.2],"kind":"cone"}]}));
     let state = s.model.state();

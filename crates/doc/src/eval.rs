@@ -7866,6 +7866,29 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             *target = result;
             Ok(())
         }
+        FeatureKind::MeshFit { body, tolerance, picks, all_surfaces } => {
+            let tolerance = val(vals, tolerance, Kind::Length)?;
+            let source = st.body(body).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
+            if doc.model_body_component(source) != f.component {
+                return Err(DocError::Invalid("activate the mesh body's component before fitting bodies to it".into()));
+            }
+            let mut picked: Vec<(Vec3, kernel::SurfaceKind)> = picks
+                .iter()
+                .map(|p| {
+                    let [x, y, z] = p.point;
+                    (Vec3::new(x, y, z), p.kind)
+                })
+                .collect();
+            if *all_surfaces {
+                picked.extend(kernel::picks_for_all(&source.body, tolerance)?);
+            }
+            let made = kernel::fit_bodies(&source.body, tolerance, &picked)?;
+            for (k, (name, b)) in made.into_iter().enumerate() {
+                let name = copy_body_name(st, f, k, &name);
+                st.bodies.push(ModelBody::new(name, b, f.id));
+            }
+            Ok(())
+        }
         FeatureKind::MeshImport { meshes, .. } => {
             for (k, (name, b)) in mesh_bodies(meshes)?.into_iter().enumerate() {
                 let name = copy_body_name(st, f, k, &name);

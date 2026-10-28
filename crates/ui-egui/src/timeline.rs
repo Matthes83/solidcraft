@@ -105,7 +105,7 @@ pub(crate) fn icon_of(k: &FeatureKind) -> &'static str {
         FeatureKind::Draft { .. } => "draft",
         FeatureKind::Split { .. } => "split",
         FeatureKind::Move { .. } => "move",
-        FeatureKind::Import { .. } | FeatureKind::MeshImport { .. } | FeatureKind::MeshConvert { .. } => "import",
+        FeatureKind::Import { .. } | FeatureKind::MeshImport { .. } | FeatureKind::MeshConvert { .. } | FeatureKind::MeshFit { .. } => "import",
         FeatureKind::BodyTransfer { .. } => "move",
         FeatureKind::Thread { .. } => "thread",
         FeatureKind::SplitFace { .. } => "split_face",

@@ -1764,6 +1764,18 @@ pub enum FeatureKind {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         all_surfaces: bool,
     },
+    /// One solid per surface picked on a mesh body, to build the part from by hand: a plane's
+    /// material side as a block over the mesh, a cylinder or cone over its length, a sphere
+    /// whole. The mesh body stays.
+    MeshFit {
+        body: BodyName,
+        #[walk(length = "Tolerance")]
+        tolerance: Expr,
+        picks: Vec<MeshPick>,
+        /// A solid for every surface of the mesh, as if each had been picked.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all_surfaces: bool,
+    },
     /// Mesh bodies imported from a 3MF or STL file, embedded in the design.
     MeshImport {
         /// Source file name (display only).
@@ -2417,6 +2429,7 @@ impl FeatureKind {
             FeatureKind::Import { .. } => "BaseFeature",
             FeatureKind::MeshImport { .. } => "MeshFeature",
             FeatureKind::MeshConvert { .. } => "MeshConvertFeature",
+            FeatureKind::MeshFit { .. } => "MeshFitFeature",
         }
     }
     /// Default name prefix (`Extrude` → `Extrude1`).
@@ -2500,6 +2513,7 @@ impl FeatureKind {
             FeatureKind::Import { .. } => "Import",
             FeatureKind::MeshImport { .. } => "Mesh",
             FeatureKind::MeshConvert { .. } => "ConvertMesh",
+            FeatureKind::MeshFit { .. } => "SurfaceBodies",
         }
     }
 }

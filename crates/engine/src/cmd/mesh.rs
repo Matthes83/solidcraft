@@ -9,7 +9,8 @@ use super::{
     CommandSpec,
     features::{add_feature, check_expr},
 };
-use crate::schema::mesh::{MeshRecognizeParams, MeshRecognizeResult, MeshRegionReply};
+use crate::schema::features::FeatureResult;
+use crate::schema::mesh::{MeshFitParams, MeshRecognizeParams, MeshRecognizeResult, MeshRegionReply};
 use crate::schema::{TypedContract, output_schema_for};
 use crate::{
     Result, Sel, Session,
@@ -17,11 +18,17 @@ use crate::{
 };
 
 const RECOGNIZE_CONTRACT: TypedContract<MeshRecognizeParams> = TypedContract::new();
+const FIT_CONTRACT: TypedContract<MeshFitParams> = TypedContract::new();
 
 pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("mesh.convert", "Convert Mesh", convert)
         .icon("import")
         .params("body?: mesh body name (default: the selected mesh body); tolerance?: length expression (default 0.05 mm): picks?: [{point: [x,y,z] on the mesh (body coordinates), kind?: auto|plane|cylinder|cone|sphere}] surfaces recognised first (see mesh.recognize), the mesh's vertices put onto them; picked drill points (cones) and spherical pockets are cut as solids of their own; all_surfaces?: bool recognise every surface first (noisy scans); reconstruct a closed constant-section or milled mechanical mesh (walls and holes along up to six machining directions, floors across them) as editable planar, cylindrical, conical and spherical faces, certified against the mesh, with a parametric timeline feature in the mesh body's owning component (the active component must be that component or an ancestor; otherwise activate the named component first); the active component is unchanged; name?"),
+    CommandSpec::new("mesh.fit_bodies", "Bodies from Surfaces", crate::checked!("mesh.fit_bodies", fit_bodies))
+        .icon("import")
+        .contract(&FIT_CONTRACT)
+        .output(output_schema_for::<FeatureResult>)
+        .params("body?: mesh body name (default: the selected mesh body); tolerance?: length expression (default 0.05 mm); picks?: [{point: [x,y,z] on the mesh (body coordinates), kind?: auto|plane|cylinder|cone|sphere}]; all_surfaces?: bool: one solid per picked surface, to build the part from by hand: a plane's material side as a block over the whole mesh, a cylinder or cone over its region's length (a little longer, so a bore's solid cuts through), a sphere whole; the mesh body stays; name?"),
     CommandSpec::new("mesh.recognize", "Recognize Surface", crate::checked!("mesh.recognize", recognize))
         .icon("inspect")
         .noundo()
@@ -123,4 +130,33 @@ fn recognize(s: &mut Session, p: &Value) -> Result<Value> {
         })
         .collect();
     serde_json::to_value(MeshRecognizeResult { body, regions, param_warnings: Vec::new() }).map_err(|e| bad(cmd, e.to_string()))
+}
+
+fn fit_bodies(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "mesh.fit_bodies";
+    let state = s.model.state();
+    let body = target(s, p, cmd)?;
+    let source = state.body(&body).ok_or_else(|| bad(cmd, format!("no body `{body}`")))?;
+    if !source.body.is_mesh() {
+        return Err(bad(cmd, "select a mesh body"));
+    }
+    let tolerance = expr(p, "tolerance").unwrap_or_else(|| "0.05 mm".into());
+    check_expr(s, &tolerance, Kind::Length, cmd, "tolerance")?;
+    let picks = picks(p, cmd)?;
+    let all_surfaces = bool_(p, "all_surfaces").unwrap_or(false);
+    if picks.is_empty() && !all_surfaces {
+        return Err(bad(cmd, "pick at least one surface on the mesh (or set all_surfaces: true)"));
+    }
+    let owner = s.doc.model_body_component(source);
+    if !s.doc.component_within(owner, s.active_component) {
+        let name = s.doc.components.iter().find(|c| c.id == owner).map(|c| c.name.as_str()).unwrap_or(s.doc.name.as_str());
+        return Err(bad(cmd, format!("activate component '{name}' first")));
+    }
+    // The solids belong with the mesh, in its component's own frame.
+    let active_component = std::mem::replace(&mut s.active_component, owner);
+    let active_occurrence_path = s.active_occurrence_path.take();
+    let result = add_feature(s, p, FeatureKind::MeshFit { body: body.into(), tolerance, picks, all_surfaces });
+    s.active_component = active_component;
+    s.active_occurrence_path = active_occurrence_path;
+    result
 }

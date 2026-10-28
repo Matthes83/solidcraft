@@ -688,7 +688,12 @@ fn additional_rows(app: &mut SolveApp, d: &mut Dialog, ui: &mut egui::Ui) -> boo
         Kind::PathPlane { t, .. } => {
             enter |= expr_row(ui, "Position (0 to 1)", t);
         }
-        Kind::MeshConvert { tolerance, kinds, found } => {
+        Kind::MeshConvert { tolerance, kinds, found, separate } => {
+            form_row(ui, "Result", |ui| {
+                let mut i = usize::from(*separate);
+                ui_kit::segmented(ui, &mut i, &["Solid from mesh", "Bodies from surfaces"], Default::default());
+                *separate = i == 1;
+            });
             form_row(ui, "Tolerance", |ui| enter |= field(ui, tolerance));
             mesh_surface_rows(app, ui, &d.inputs, &mut d.extra, tolerance, kinds, found);
         }
