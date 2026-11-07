@@ -8336,18 +8336,55 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             }
             Ok(())
         }
-        FeatureKind::MeshConvert { body, tolerance } => {
+        FeatureKind::MeshConvert { body, tolerance, picks, all_surfaces } => {
             let tolerance = val(vals, tolerance, Kind::Length)?;
             let index = st.bodies.iter().position(|b| &b.name == body).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
             let source = st.bodies.get(index).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
             if doc.model_body_component(source) != f.component {
                 return Err(DocError::Invalid("activate the mesh body's component before converting it".into()));
             }
-            let converted = kernel::convert_prismatic_mesh(&source.body, tolerance)?;
+            let mut picked: Vec<(Vec3, solidcraft_mesh_fit::SurfaceKind)> = picks
+                .iter()
+                .map(|p| {
+                    let [x, y, z] = p.point;
+                    (Vec3::new(x, y, z), p.kind)
+                })
+                .collect();
+            if *all_surfaces {
+                picked.extend(solidcraft_mesh_fit::picks_for_all(&source.body, tolerance)?);
+            }
+            let converted = solidcraft_mesh_fit::convert_mesh_with_regions(&source.body, tolerance, &picked)?;
             let converted = converted.with_color(source.body.color());
             let result = ModelBody::new(source.name.clone(), converted, f.id);
             let target = st.bodies.get_mut(index).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
             *target = result;
+            Ok(())
+        }
+        FeatureKind::MeshFit { body, tolerance, picks, all_surfaces, surfaces, round } => {
+            let tolerance = val(vals, tolerance, Kind::Length)?;
+            let round = match round {
+                Some(r) => val(vals, r, Kind::Length)?,
+                None => 0.,
+            };
+            let source = st.body(body).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
+            if doc.model_body_component(source) != f.component {
+                return Err(DocError::Invalid("activate the mesh body's component before fitting bodies to it".into()));
+            }
+            let mut picked: Vec<(Vec3, solidcraft_mesh_fit::SurfaceKind)> = picks
+                .iter()
+                .map(|p| {
+                    let [x, y, z] = p.point;
+                    (Vec3::new(x, y, z), p.kind)
+                })
+                .collect();
+            if *all_surfaces {
+                picked.extend(solidcraft_mesh_fit::picks_for_all(&source.body, tolerance)?);
+            }
+            let made = solidcraft_mesh_fit::fit_bodies(&source.body, tolerance, &picked, *surfaces, round)?;
+            for (k, (name, b)) in made.into_iter().enumerate() {
+                let name = copy_body_name(st, f, k, &name);
+                st.bodies.push(ModelBody::new(name, b, f.id));
+            }
             Ok(())
         }
         FeatureKind::MeshImport { meshes, .. } => {

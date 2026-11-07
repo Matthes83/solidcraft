@@ -205,7 +205,7 @@ fn drawing_bounds(_s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"min": [lo.x, lo.y], "max": [hi.x, hi.y], "width": hi.x - lo.x, "height": hi.y - lo.y}))
 }
 
-fn insert(s: &mut Session, p: &Value, cmd: &str, svg: bool) -> Result<Value> {
+pub(super) fn insert(s: &mut Session, p: &Value, cmd: &str, svg: bool) -> Result<Value> {
     let (geom, (lo, hi)) = read_drawing(p, cmd, svg)?;
     // A size in millimetres wins over a factor; the aspect ratio is always kept.
     let natural = (hi.x - lo.x, hi.y - lo.y);

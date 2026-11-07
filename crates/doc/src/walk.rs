@@ -43,6 +43,8 @@ impl Walk for f64 {}
 impl Walk for usize {}
 impl Walk for u32 {}
 impl Walk for ProfileSel {}
+/// A point picked on a mesh body: where a surface was recognised, not geometry that moves.
+impl Walk for crate::MeshPick {}
 impl Walk for std::collections::BTreeMap<String, String> {}
 impl Walk for crate::frame::Anchor {}
 impl Walk for solidcraft_sketch::Sketch {}

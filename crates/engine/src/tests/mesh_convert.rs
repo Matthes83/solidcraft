@@ -145,6 +145,91 @@ fn exported_binary_stl_with_a_bore_reconstructs_analytic_faces() {
     std::fs::remove_file(path).unwrap();
 }
 
+/// A milled part written as STL (a pocket, a through hole from the top, a blind hole from the
+/// front and a through hole from the side) comes back as planes and cylinders of the same
+/// volume, not as a faceted solid.
+#[test]
+fn exported_stl_of_a_milled_part_reconstructs_pockets_and_holes_from_three_sides() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length":60,"width":40,"height":25,"corner":[0,0,0]}));
+    run(&mut s, "solid.box", json!({"length":20,"width":20,"height":11,"corner":[10,10,15],"operation":"cut"}));
+    run(&mut s, "solid.cylinder", json!({"base":[45,20,-1],"radius":4,"height":27,"operation":"cut"}));
+    run(&mut s, "solid.cylinder", json!({"base":[45,-1,8],"radius":3,"height":16,"axis":"Y","operation":"cut"}));
+    run(&mut s, "solid.cylinder", json!({"base":[-1,33,6],"radius":2.5,"height":62,"axis":"X","operation":"cut"}));
+    let expected = solidcraft_kernel::measure(&s.model.state().bodies[0].body).unwrap().volume;
+    let path = std::env::temp_dir().join(format!("solidcraft-mesh-convert-milled-{}.stl", std::process::id()));
+    run(&mut s, "file.save_mesh", json!({"path":path}));
+    run(&mut s, "doc.open", json!({"path":path}));
+    let name = s.model.state().bodies[0].name.clone();
+    run(&mut s, "mesh.convert", json!({"body":name,"tolerance":"0.05 mm"}));
+    let state = s.model.state();
+    let body = &state.bodies[0].body;
+    assert!(!body.is_mesh());
+    assert!(body.validity().is_empty());
+    let measured = solidcraft_kernel::measure(body).unwrap();
+    assert!((measured.volume - expected).abs() < 1., "{} vs {expected}", measured.volume);
+    assert_eq!(measured.merged.face_types.get("cylinder"), Some(&3), "{:?}", measured.merged.face_types);
+    std::fs::remove_file(path).unwrap();
+}
+
+/// Reverse engineering by hand: a pick on an imported mesh recognises the surface there, and
+/// the conversion with the picked drill point builds the bore's cone, which converting the
+/// mesh as it is refuses.
+#[test]
+fn picked_surfaces_are_recognised_and_complete_the_solid() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length":40,"width":30,"height":20,"corner":[0,0,0]}));
+    run(&mut s, "solid.cone", json!({"base":[12,15,8],"axis":[0,0,-1],"radius":4,"top_radius":0,"height":2.4,"operation":"cut"}));
+    run(&mut s, "solid.cylinder", json!({"base":[12,15,8],"radius":4,"height":13,"operation":"cut"}));
+    let expected = solidcraft_kernel::measure(&s.model.state().bodies[0].body).unwrap().volume;
+    let path = std::env::temp_dir().join(format!("solidcraft-mesh-picks-{}.stl", std::process::id()));
+    run(&mut s, "file.save_mesh", json!({"path":path}));
+    run(&mut s, "doc.open", json!({"path":path}));
+    let name = s.model.state().bodies[0].name.clone();
+    let bore = run(&mut s, "mesh.recognize", json!({"body":name,"point":[16,15,14]}));
+    assert_eq!(bore["regions"][0]["kind"], "cylinder", "{bore}");
+    assert!((bore["regions"][0]["surface"]["radius"].as_f64().unwrap() - 4.).abs() < 0.01, "{bore}");
+    assert_eq!(bore["regions"][0]["concave"], true);
+    let tip = run(&mut s, "mesh.recognize", json!({"body":name,"point":[13.5,15,7.2]}));
+    assert_eq!(tip["regions"][0]["kind"], "cone", "{tip}");
+    let all = run(&mut s, "mesh.recognize", json!({"body":name,"all":true}));
+    assert!(all["regions"].as_array().unwrap().len() >= 8, "{all}");
+    assert!(s.execute("mesh.recognize", &json!({"body":name,"point":[30,25,20],"kind":"sphere"})).is_err());
+    // Bodies from surfaces: one solid per pick, the mesh kept.
+    let made = run(&mut s, "mesh.fit_bodies", json!({"body":name,"picks":[{"point":[30,25,20]},{"point":[16,15,14]},{"point":[13.5,15,7.2]}]}));
+    let state = s.model.state();
+    assert!(state.body(&name).unwrap().body.is_mesh(), "the mesh stays");
+    let names: Vec<&str> = state.bodies.iter().map(|b| b.name.as_str()).collect();
+    assert!(
+        names.iter().any(|n| n.starts_with("Plane"))
+            && names.iter().any(|n| n.starts_with("Cylinder Ø8"))
+            && names.iter().any(|n| n.starts_with("Cone")),
+        "{names:?} {made}"
+    );
+    assert!(s.execute("mesh.fit_bodies", &json!({"body":name})).is_err());
+    // As surfaces, and the top face's outline as a sketch: rectangle and bore circle, no facets.
+    run(&mut s, "mesh.fit_bodies", json!({"body":name,"surfaces":true,"picks":[{"point":[30,25,20]},{"point":[16,15,14]}]}));
+    assert!(s.model.state().bodies.iter().any(|b| b.name.starts_with("Plane surface")));
+    let sk = run(&mut s, "mesh.sketch_outline", json!({"body":name,"point":[30,25,20]}));
+    assert_eq!(sk["curves"], 5, "{sk}");
+    let id = sk["sketch"].as_u64().unwrap();
+    let profiles = s.model.state().sketch(id).unwrap().profiles.clone();
+    let area: f64 = profiles.iter().map(|p| p.area).fold(0., f64::max);
+    assert!((area - (1200. - std::f64::consts::PI * 16.)).abs() < 0.5 || (area - 1200.).abs() < 0.5, "{area}");
+    assert!(s.execute("mesh.convert", &json!({"body":name})).is_err());
+    run(&mut s, "mesh.convert", json!({"body":name,"picks":[{"point":[13.5,15,7.2],"kind":"cone"}]}));
+    let state = s.model.state();
+    let body = &state.bodies[0].body;
+    assert!(!body.is_mesh());
+    let measured = solidcraft_kernel::measure(body).unwrap();
+    assert!((measured.volume - expected).abs() < 0.5, "{} vs {expected}", measured.volume);
+    assert_eq!(measured.merged.face_types.get("cylinder"), Some(&1), "{:?}", measured.merged.face_types);
+    // The picks are saved with the feature and rebuild after reopening.
+    let saved = s.doc.to_json();
+    assert!(saved.contains("\"picks\""), "{saved}");
+    std::fs::remove_file(path).unwrap();
+}
+
 /// #784: STL is closed as written where faces meet (a fillet, a bored hole): every edge of the
 /// file, keyed by its exact f32 ends, is shared by exactly two triangles, as in 3MF.
 #[test]
@@ -606,4 +691,34 @@ fn conversion_from_another_branch_names_the_component_to_activate() {
     assert!(error.contains("activate component 'Mesh 1' first"), "{error}");
     assert_eq!(s.doc.to_json(), before);
     assert_eq!((s.active_component, s.active_occurrence_path.clone()), context);
+}
+
+/// The reverse-engineering tools on a scanned box: squared onto the axes, sectioned into a
+/// sketch, and a solid checked against it.
+#[test]
+fn a_turned_mesh_is_aligned_sectioned_and_checked() {
+    let mut s = imported_box();
+    run(&mut s, "solid.move", json!({"bodies": ["Mesh"], "translate": [7, -3, 11], "axis": [1, 2, 3], "angle": "37 deg"}));
+    let r = run(&mut s, "mesh.align", json!({"body": "Mesh", "tolerance": "0.01 mm", "centred": false}));
+    assert_eq!(r["body"], "Mesh");
+    let state = s.model.state();
+    let b = state.body("Mesh").unwrap().body.outline_bounds();
+    let (lo, hi) = (b.min, b.max);
+    assert!(lo.len() < 1e-6, "corner at the origin: {lo:?}");
+    let mut size = [hi.x - lo.x, hi.y - lo.y, hi.z - lo.z];
+    size.sort_by(f64::total_cmp);
+    for (got, want) in size.iter().zip([10., 20., 30.]) {
+        assert!((got - want).abs() < 1e-6, "square on the axes: {size:?}");
+    }
+    // One undo puts it back where it was.
+    let height = hi.z;
+    run(&mut s, "edit.undo", json!({}));
+    run(&mut s, "edit.redo", json!({}));
+    let r = run(&mut s, "mesh.section_sketch", json!({"body": "Mesh", "plane": "XY", "offset": format!("{} mm", height / 2.), "name": "Cut"}));
+    assert_eq!(r["curves"], 4, "{r}");
+    run(&mut s, "solid.box", json!({"corner": [0, 0, 0], "length": hi.x, "width": hi.y, "height": hi.z, "body_name": "Rebuilt"}));
+    let r = run(&mut s, "mesh.deviation", json!({"solid": "Rebuilt", "body": "Mesh", "tolerance": "0.01 mm"}));
+    assert!(r["max"].as_f64().unwrap() < 1e-3 && r["within"].as_f64().unwrap() > 0.999, "{r}");
+    let r = s.execute("mesh.deviation", &json!({"solid": "Mesh", "body": "Rebuilt"}));
+    assert!(r.is_err(), "the solid must not be the mesh");
 }

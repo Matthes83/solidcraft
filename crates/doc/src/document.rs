@@ -1779,11 +1779,39 @@ pub enum FeatureKind {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         skip: Vec<u64>,
     },
-    /// Rebuild an upstream constant-section mesh with analytic planar/cylindrical faces.
+    /// Rebuild an upstream constant-section or milled mesh with analytic planar/cylindrical faces.
     MeshConvert {
         body: BodyName,
         #[walk(length = "Tolerance")]
         tolerance: Expr,
+        /// Surfaces picked on the mesh, in order (reverse engineering by hand): each pick's
+        /// region is recognised and the mesh's vertices are put onto it before the solid is
+        /// built. Empty in designs from before picks: the mesh converts as it is.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        picks: Vec<MeshPick>,
+        /// Recognise every surface of the mesh first, as if each had been picked.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all_surfaces: bool,
+    },
+    /// One solid per surface picked on a mesh body, to build the part from by hand: a plane's
+    /// material side as a block over the mesh, a cylinder or cone over its length, a sphere
+    /// whole. The mesh body stays.
+    MeshFit {
+        body: BodyName,
+        #[walk(length = "Tolerance")]
+        tolerance: Expr,
+        picks: Vec<MeshPick>,
+        /// A solid for every surface of the mesh, as if each had been picked.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all_surfaces: bool,
+        /// Sheets on the surfaces, bounded as their regions are, instead of solids.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        surfaces: bool,
+        /// Sizes rounded to this grid where that stays within the tolerance (7.98 measured is
+        /// 8 drawn): radii, axis-aligned plane offsets and axis positions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[walk(length = "Round to")]
+        round: Option<Expr>,
     },
     /// Mesh bodies imported from a 3MF or STL file, embedded in the design.
     MeshImport {
@@ -2033,6 +2061,15 @@ fn fair_iterations() -> u32 {
 }
 fn fair_keep_edges() -> bool {
     true
+}
+
+/// A surface picked on a mesh body for [`FeatureKind::MeshConvert`]: a point on the mesh, in
+/// the body's coordinates, and the kind of surface there (`auto` for whichever fits).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MeshPick {
+    pub point: [f64; 3],
+    #[serde(default)]
+    pub kind: solidcraft_mesh_fit::SurfaceKind,
 }
 
 /// Triangles of one imported mesh body (millimetres). The arrays are shared by clones: every
@@ -2452,6 +2489,7 @@ impl FeatureKind {
             FeatureKind::Import { .. } => "BaseFeature",
             FeatureKind::MeshImport { .. } => "MeshFeature",
             FeatureKind::MeshConvert { .. } => "MeshConvertFeature",
+            FeatureKind::MeshFit { .. } => "MeshFitFeature",
         }
     }
 
@@ -2531,6 +2569,7 @@ impl FeatureKind {
             FeatureKind::Move { .. } => "move",
             FeatureKind::Import { .. } => "import",
             FeatureKind::MeshConvert { .. } => "mesh_convert",
+            FeatureKind::MeshFit { .. } => "mesh_fit",
             FeatureKind::MeshImport { .. } => "mesh_import",
         }
     }
@@ -2612,6 +2651,7 @@ impl FeatureKind {
             "BaseFeature" => "import",
             "MeshFeature" => "mesh_import",
             "MeshConvertFeature" => "mesh_convert",
+            "MeshFitFeature" => "mesh_fit",
             _ => return None,
         })
     }
@@ -2696,6 +2736,7 @@ impl FeatureKind {
             FeatureKind::Import { .. } => "Import",
             FeatureKind::MeshImport { .. } => "Mesh",
             FeatureKind::MeshConvert { .. } => "ConvertMesh",
+            FeatureKind::MeshFit { .. } => "SurfaceBodies",
         }
     }
 }

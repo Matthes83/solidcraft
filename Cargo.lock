@@ -4279,6 +4279,7 @@ dependencies = [
  "solidcraft-derive",
  "solidcraft-geom",
  "solidcraft-kernel",
+ "solidcraft-mesh-fit",
  "solidcraft-render",
  "solidcraft-sketch",
  "thiserror 2.0.21",
@@ -4299,6 +4300,7 @@ dependencies = [
  "solidcraft-geom",
  "solidcraft-io",
  "solidcraft-kernel",
+ "solidcraft-mesh-fit",
  "solidcraft-render",
  "solidcraft-sketch",
  "thiserror 2.0.21",
@@ -4388,6 +4390,15 @@ dependencies = [
  "serde_json",
  "solidcraft-engine",
  "solidcraft-gpu",
+]
+
+[[package]]
+name = "solidcraft-mesh-fit"
+version = "0.30.1"
+dependencies = [
+ "serde",
+ "solidcraft-geom",
+ "solidcraft-kernel",
 ]
 
 [[package]]

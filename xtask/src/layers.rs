@@ -44,6 +44,8 @@ pub const TABLE: &[(&str, Class)] = &[
     ("3dx-client", Class::Standalone),
     ("sketch", Class::Layer(1)),
     ("kernel", Class::Layer(1)),
+    // reverse engineering of meshes, on the kernel's public API
+    ("mesh-fit", Class::Layer(1)),
     ("render", Class::Layer(1)),
     ("doc", Class::Layer(2)),
     ("io", Class::Layer(3)),
@@ -62,7 +64,7 @@ pub const TABLE: &[(&str, Class)] = &[
 /// Explicit orderings *within* a layer (earlier may be used by later).
 /// The viewport draws display plans the GPU crate evaluates and draws with its pipelines; the MCP
 /// server's tests draw screenshots with them.
-pub const INTRA_LAYER_ORDER: &[&[&str]] = &[&["gpu", "ui-egui"], &["gpu", "mcp"]];
+pub const INTRA_LAYER_ORDER: &[&[&str]] = &[&["gpu", "ui-egui"], &["gpu", "mcp"], &["kernel", "mesh-fit"]];
 
 fn intra_layer_allowed(from: &str, to: &str) -> bool {
     let (from, to) = (short_name(from), short_name(to));
